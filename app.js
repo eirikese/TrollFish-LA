@@ -7346,7 +7346,10 @@ async function setVideoExternalMode(fileId, { external = false, athleteId = null
   const prevMeta = state.fileMeta?.[fileId] || {};
   const nextMeta = { ...prevMeta };
 
-  await DB.updateFileFields(fileId, { playback_only: !!external });
+  // Claiming a video for analysis (external=false) sets force_analyze so the
+  // pipeline's auto re-flag loop and playback-only heuristic leave it analyzable,
+  // even with no matching CSV. Marking it External clears the protection.
+  await DB.updateFileFields(fileId, { playback_only: !!external, force_analyze: !external });
 
   if (external) {
     nextMeta.athlete_id = null;
@@ -11175,7 +11178,7 @@ function openAssignPopup(fileId, anchor, kind) {
   if (kind === 'video') {
     const modeOpt = document.createElement('div');
     modeOpt.className='assign-opt';
-    modeOpt.textContent = playbackOnly ? 'Use as Athlete Video' : 'Mark as External Video';
+    modeOpt.textContent = playbackOnly ? 'Analyze (connect athlete, no CSV)' : 'Mark as External Video';
     modeOpt.onclick = async()=>{
       if (playbackOnly) {
         await setVideoExternalMode(fileId, { external: false, athleteId: null });
@@ -11527,7 +11530,7 @@ function renderAssignList() {
       const curAthId = meta.athlete_id || '';
       const isManual = meta.manual_athlete;
       let options = '<option value="">— Auto from CSV —</option>';
-      options += '<option value="__external__">External (playback only)</option>';
+      options += '<option value="__external__">External — not analyzed</option>';
       for(const a of state.athletes) {
         const sel = a.id === curAthId ? ' selected' : '';
         options += `<option value="${a.id}"${sel}>${a.name}${a.weight ? ' (' + a.weight + 'kg)' : ''}</option>`;
@@ -11564,12 +11567,12 @@ function renderAssignList() {
       const card = document.createElement('div');
       card.className = 'assign-card';
       const sourceText = f.capture_ts_source === 'quicktime_user_date'
-        ? 'Synced from the embedded original capture timestamp.'
+        ? 'Synced from the embedded original capture timestamp. Pick an athlete to analyze (no CSV needed).'
         : (f.capture_ts_source === 'quicktime_creationdate'
-          ? 'Synced from the embedded QuickTime capture timestamp.'
+          ? 'Synced from the embedded QuickTime capture timestamp. Pick an athlete to analyze (no CSV needed).'
           : (f.capture_ts_source === 'quicktime_mvhd'
-            ? 'Synced from the QuickTime movie header timestamp.'
-            : 'Shown on the timeline for playback only.'));
+            ? 'Synced from the QuickTime movie header timestamp. Pick an athlete to analyze (no CSV needed).'
+            : 'Shown on the timeline for playback only. Pick an athlete to analyze (no CSV needed).'));
       card.innerHTML = `
         <span class="f-kind video">VID</span>
         <div class="assign-card-info">
@@ -11577,7 +11580,7 @@ function renderAssignList() {
           <div class="assign-card-auto">${sourceText}</div>
         </div>
         <select class="assign-select" data-fid="${f.id}" data-kind="video">
-          <option value="__external__" selected>External (playback only)</option>
+          <option value="__external__" selected>External — not analyzed</option>
           ${state.athletes.map(a => `<option value="${a.id}">${a.name}${a.weight ? ` (${a.weight}kg)` : ''}</option>`).join('')}
         </select>
       `;

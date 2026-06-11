@@ -183,6 +183,7 @@ function looksLikeAppleCaptureFilename(filename) {
 }
 
 function isStoredPlaybackOnlyVideo(file) {
+  if (file?.force_analyze) return false;   // user opted this video into analysis (overrides flag + heuristic)
   if (file?.playback_only) return true;
   const captureStartTs = normalizeEpochSeconds(file?.capture_start_ts);
   if (captureStartTs == null) return false;
@@ -585,9 +586,10 @@ export async function buildMapData(projectId) {
   const finalUnmatchedVideoIds = [...videoFileIdsWithGps].filter(id => !finalMatchedVideoIds.has(id));
   if (finalUnmatchedVideoIds.length > 0) {
     for (const id of finalUnmatchedVideoIds) {
+      const fileToPatch = files.find(f => f.id === id);
+      if (fileToPatch?.force_analyze) continue;   // user explicitly claimed this video for analysis
       await DB.updateFileFields(id, { playback_only: true });
       playbackOnlyIds.add(String(id));
-      const fileToPatch = files.find(f => f.id === id);
       if (fileToPatch) fileToPatch.playback_only = true;
     }
   }
