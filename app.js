@@ -229,6 +229,11 @@ let _timelineMetricLoadToken = 0;
 const TIMELINE_METRIC_LOAD_ABORTED = 'timeline_metric_load_aborted';
 const TIMELINE_PROCESSED_STATS_REFRESH_MS = 90;
 const TIMELINE_STATS_UI_REFRESH_MS = 80;
+// During playback the timeline advances every animation frame (~60fps) for smooth
+// video, but the secondary timeline UI (markers, SOG canvas, labels, layout, stats)
+// does not need 60fps. Throttling it to ~20fps cuts per-frame DOM/canvas work
+// roughly 3x — a big win on machines that struggle with dual video decode.
+const TIMELINE_UI_REFRESH_MS = 50;
 const TIMELINE_INSTANT_METRIC_MAX_GAP_SEC = 4.0;
 const TIMELINE_VMG_MOTION_MAX_GAP_SEC = 8.0;
 const TIMELINE_STAT_OVERLAY_WINDOW_SEC = 12;
@@ -7700,7 +7705,12 @@ function renderMap() {
 
   // Video tracks
   for(const v of vids) {
-    if (v.playback_only) continue;
+    // A video's own GoPro GPS track should always render on the map — even if the
+    // video is classified playback_only/external. Only skip a playback-only video
+    // when it has no GPS of its own (getVideoMapPoints then returns no direct pts,
+    // so a phone clip without telemetry stays off the map).
+    const hasOwnGps = Array.isArray(v.points) && v.points.length >= 2;
+    if (v.playback_only && !hasOwnGps) continue;
     const pts = getVideoMapPoints(v, csvs);
     if(!pts.length) continue;
     const color = state.videoColors[v.id] || '#1d8fd8';
@@ -10842,6 +10852,13 @@ function tlPause() {
 
   clearAllOverlays();
   updatePlayPauseIcon();
+  // Playback throttles the timeline UI to ~20fps, so on pause do one final refresh
+  // to land the playhead, labels and stats exactly where playback stopped.
+  tl._lastUiRefreshAt = 0;
+  if (keepTimelinePlayheadInView()) drawSogCanvas();
+  else updatePlayhead();
+  updateTimeLabel();
+  updateTimelineStats(true);
   if (tl._pendingProcessedMetricRefresh) refreshTimelineProcessedMetricStats();
 }
 
@@ -10911,19 +10928,28 @@ function tlAnimLoop(now) {
   // If no panes are visible, show the empty state
   const anyVisLoop = tl.athleteSlots.some(s => s.paneEl && s.paneEl.style.display !== 'none');
   showNoVideo(!anyVisLoop);
-  syncInlineHeatmapPanelLayout();
 
-  // Hide arrows for videos not currently playing
-  syncActivePositionMarkers(activeIdsLoop);
-  keepPlaybackMarkersInView(activeIdsLoop);
+  // Keep the phone (second) video synced every frame — it must track the master
+  // video closely; the function already self-throttles its own drift seeks.
   syncPhonePlaybackToTimeline({ forceSeek: false, forceReload: false });
 
-  if (keepTimelinePlayheadInView()) drawSogCanvas();
-  else updatePlayhead();
-  updateTimeLabel();
-  maybeRefreshWindEstimate(false);
-  updateTimelineStats();
-  updateCurrentSegmentActions();
+  // Throttle the heavier, non-critical timeline UI to ~20fps. The timeline clock and
+  // video playback above still update every frame, so motion stays smooth; these
+  // panels just refresh slightly less often.
+  const lastUi = Number(tl._lastUiRefreshAt) || 0;
+  if (now - lastUi >= TIMELINE_UI_REFRESH_MS) {
+    tl._lastUiRefreshAt = now;
+    syncInlineHeatmapPanelLayout();
+    // Hide arrows for videos not currently playing
+    syncActivePositionMarkers(activeIdsLoop);
+    keepPlaybackMarkersInView(activeIdsLoop);
+    if (keepTimelinePlayheadInView()) drawSogCanvas();
+    else updatePlayhead();
+    updateTimeLabel();
+    maybeRefreshWindEstimate(false);
+    updateTimelineStats();
+    updateCurrentSegmentActions();
+  }
 
   // Real-time pose overlay — run detection on visible slots
   if (isRealtimePoseEnabled()) {
