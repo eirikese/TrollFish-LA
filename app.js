@@ -10034,6 +10034,17 @@ function smoothTimelineAngleValue(slot, metricKey, value, ts, { maxHoldSec = 6, 
   return out;
 }
 
+// First index in a ts-sorted point array whose ts >= target (binary search).
+function lowerBoundByTs(pts, target) {
+  let lo = 0, hi = pts.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (pts[mid].ts < target) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
 function sogGapThreshold(pts) {
   if (!pts || pts.length < 3) return 20;
   const gaps = [];
@@ -10438,36 +10449,71 @@ function drawSogCanvas() {
     ctx.fillText(label, x + 2, h - 2);
   }
 
-  // Find max SOG across all slots for scaling
+  // Find max SOG across all slots for scaling. maxSog over the full series is a
+  // fixed property of the data, so cache it per slot rather than rescanning every
+  // (60fps) redraw — the full-series scan was a big cost when zoomed out.
   let maxSog = 0;
   for (const slot of tl.athleteSlots) {
-    for (const p of slot.sogPts) {
-      if (p.sog > maxSog) maxSog = p.sog;
+    if (slot._sogMaxCache == null || slot._sogMaxCacheLen !== slot.sogPts.length) {
+      let m = 0;
+      for (const p of slot.sogPts) { if (p.sog > m) m = p.sog; }
+      slot._sogMaxCache = m;
+      slot._sogMaxCacheLen = slot.sogPts.length;
     }
+    if (slot._sogMaxCache > maxSog) maxSog = slot._sogMaxCache;
   }
   if (maxSog < 1) maxSog = 10;
   maxSog *= 1.1; // 10% headroom
 
-  // Draw SOG curves — one per athlete, each in their color
+  // Draw SOG curves — one per athlete, each in their color. Only the points inside
+  // the visible time window are walked (binary-searched), and they're bucketed to
+  // ~1 column per pixel: drawing more points than the canvas is wide is wasted work
+  // and was the cause of playback jitter when zoomed out (the whole track was being
+  // stroked every frame). Cost now scales with canvas width, not point count/zoom.
   for (const slot of tl.athleteSlots) {
-    if (!slot.sogPts.length) continue;
-    const gapLimit = sogGapThreshold(slot.sogPts);
+    const pts = slot.sogPts;
+    if (!pts.length) continue;
+    const gapLimit = sogGapThreshold(pts);
+    // Window: include one point on each side so the line reaches the canvas edges.
+    let startIdx = lowerBoundByTs(pts, vStart);
+    if (startIdx > 0) startIdx--;
+    let endIdx = lowerBoundByTs(pts, vEnd);
+    if (endIdx < pts.length) endIdx++;
+
     ctx.beginPath();
     ctx.strokeStyle = slot.color;
     ctx.lineWidth = 2;
     ctx.globalAlpha = 0.9;
     let first = true;
     let prevTs = null;
-    for (const p of slot.sogPts) {
-      const x = (p.ts - vStart) / dur * w;
-      const y = PAD_TOP + plotH - (p.sog / maxSog) * plotH;
+    let curCol = -1;        // current pixel column being bucketed
+    let colMinY = 0, colMaxY = 0, colMinX = 0;
+    const yFor = sog => PAD_TOP + plotH - (sog / maxSog) * plotH;
+    const flushCol = () => {
+      if (curCol < 0) return;
+      // Draw the column's vertical extent so peaks/troughs survive downsampling.
+      if (first) { ctx.moveTo(colMinX, colMinY); first = false; }
+      else ctx.lineTo(colMinX, colMinY);
+      if (colMaxY !== colMinY) ctx.lineTo(colMinX, colMaxY);
+    };
+    for (let i = startIdx; i < endIdx; i++) {
+      const p = pts[i];
       const gapBreak = (prevTs != null && (p.ts - prevTs) > gapLimit);
       prevTs = p.ts;
-      if (x < -5 || x > w + 5) { first = true; continue; }
-      if (gapBreak) first = true;
-      if (first) { ctx.moveTo(x, y); first = false; }
-      else ctx.lineTo(x, y);
+      const x = (p.ts - vStart) / dur * w;
+      const y = yFor(p.sog);
+      if (gapBreak) { flushCol(); curCol = -1; first = true; }
+      const col = x | 0;
+      if (col !== curCol) {
+        flushCol();
+        curCol = col;
+        colMinX = x; colMinY = y; colMaxY = y;
+      } else {
+        if (y < colMinY) colMinY = y;
+        if (y > colMaxY) colMaxY = y;
+      }
     }
+    flushCol();
     ctx.stroke();
     ctx.globalAlpha = 1;
   }
