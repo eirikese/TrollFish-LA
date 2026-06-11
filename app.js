@@ -228,7 +228,9 @@ const _timelineProcessedMetricCache = new Map(); // `${projectId}:${fileId}` -> 
 let _timelineMetricLoadToken = 0;
 const TIMELINE_METRIC_LOAD_ABORTED = 'timeline_metric_load_aborted';
 const TIMELINE_PROCESSED_STATS_REFRESH_MS = 90;
-const TIMELINE_STATS_UI_REFRESH_MS = 80;
+// Timeline stat readouts refresh at 1 Hz and show the mean of the trailing second.
+const TIMELINE_STATS_UI_REFRESH_MS = 1000;
+const TIMELINE_STATS_MEAN_WINDOW_SEC = 1;
 // During playback the timeline advances every animation frame (~60fps) for smooth
 // video, but the secondary timeline UI (markers, SOG canvas, labels, layout, stats)
 // does not need 60fps. Throttling it to ~20fps cuts per-frame DOM/canvas work
@@ -9218,6 +9220,19 @@ function computeSeriesInstantValue(series, centerTs, maxGapSec = TIMELINE_INSTAN
   return nearest.v;
 }
 
+// Mean of the trailing `windowSec` seconds ending at `centerTs` — used for the
+// 1 Hz timeline stat readouts so the numbers reflect the last second rather than
+// a single instantaneous (and jumpy) sample. Falls back to the nearest sample
+// when the window has no coverage (e.g. at the very start of a track).
+function computeSeriesTrailingMean(series, centerTs, windowSec = TIMELINE_STATS_MEAN_WINDOW_SEC) {
+  const center = Number(centerTs);
+  if (!Number.isFinite(center)) return null;
+  const win = Number(windowSec) > 0 ? Number(windowSec) : TIMELINE_STATS_MEAN_WINDOW_SEC;
+  const mean = computeSeriesWindowMean(series, center - win, center);
+  if (mean != null) return mean;
+  return computeSeriesInstantValue(series, center);
+}
+
 function formatTimelineMetricValue(value, suffix = '') {
   return Number.isFinite(Number(value)) ? `${Number(value).toFixed(1)}${suffix}` : '--';
 }
@@ -9918,22 +9933,25 @@ function updateTimelineStats(force = false) {
     refs.name.textContent = slot.name || 'Athlete';
     refs.name.style.color = slot.color || '#c8cdd0';
 
+    // Scalar metrics show the mean of the trailing second (computeSeriesTrailingMean).
+    // Angular metrics (heading/cog/twa) keep nearest-sample + their existing angle
+    // smoothing below, since arithmetic means are wrong across the 0/360 wrap.
     const processedStatValues = refreshProcessedStats
       ? {
-          roll: computeSeriesInstantValue(slot.statsSeries?.roll, currentTs),
-          trunk: computeSeriesInstantValue(slot.statsSeries?.trunk, currentTs),
-          rudder: computeSeriesInstantValue(slot.statsSeries?.rudder, currentTs),
-          boom: computeSeriesInstantValue(slot.statsSeries?.boom, currentTs),
+          roll: computeSeriesTrailingMean(slot.statsSeries?.roll, currentTs),
+          trunk: computeSeriesTrailingMean(slot.statsSeries?.trunk, currentTs),
+          rudder: computeSeriesTrailingMean(slot.statsSeries?.rudder, currentTs),
+          boom: computeSeriesTrailingMean(slot.statsSeries?.boom, currentTs),
         }
       : (slot._processedTimelineStatValues || createEmptyProcessedTimelineStatValues());
     slot._processedTimelineStatValues = processedStatValues;
 
     const statValues = {
-      sog: computeSeriesInstantValue(slot.statsSeries?.sog, currentTs),
+      sog: computeSeriesTrailingMean(slot.statsSeries?.sog, currentTs),
       heading: computeSeriesInstantValue(slot.statsSeries?.heading, currentTs),
       cog: computeSeriesInstantValue(slot.statsSeries?.cog, currentTs),
-      heel: computeSeriesInstantValue(slot.statsSeries?.heel, currentTs),
-      pitch: computeSeriesInstantValue(slot.statsSeries?.pitch, currentTs),
+      heel: computeSeriesTrailingMean(slot.statsSeries?.heel, currentTs),
+      pitch: computeSeriesTrailingMean(slot.statsSeries?.pitch, currentTs),
       ...processedStatValues,
     };
     statValues.twa = computeLiveTimelineTwa(slot, currentTs);
@@ -10803,6 +10821,8 @@ function tlPlay() {
   if(tl.playing) return;
   tl.playing = true;
   tl.lastFrameTime = performance.now();
+  tl._lastUiRefreshAt = 0;       // force a UI refresh on the first played frame
+  tl._lastStatsUiUpdateAt = 0;   // and a 1 Hz stats refresh right away
   tl._pendingProcessedMetricRefresh = true;
   _timelineMetricLoadToken++;
   prewarmLikelyVideosAtTs(tl.currentTs);
@@ -10892,8 +10912,12 @@ function tlAnimLoop(now) {
     return;
   }
   const activeIdsLoop = new Set();
+  const activeVidsLoop = [];
 
-  // Check if any slot needs to switch video
+  // Per-frame: only the work needed to keep each slot's video switched to the
+  // right clip and playing. Cosmetic style writes and the map-marker move are
+  // deferred to the throttled UI block below so the decoder/compositor isn't
+  // starved by main-thread work every frame.
   for(const slot of tl.athleteSlots) {
     if (isVideoSlotHidden(slot)) {
       if (slot.paneEl) slot.paneEl.style.display = 'none';
@@ -10903,8 +10927,8 @@ function tlAnimLoop(now) {
     const vid = findSlotVideoAtTime(slot, tl.currentTs);
     if(vid) {
       activeIdsLoop.add(vid.id);
+      activeVidsLoop.push(vid);
       const switchPending = slot._desiredFileId === vid.id;
-      if (slot.currentFileId === vid.id) showSlotActiveVideo(slot);
       if(slot.currentFileId !== vid.id) {
         const videoSec = absTs2VideoSec(vid, tl.currentTs);
         if (slot.currentFileId) showSlotActiveVideo(slot);
@@ -10915,9 +10939,6 @@ function tlAnimLoop(now) {
         tryPlaySlotVideo(slot, vid.id);
       }
       monitorSlotVideoHealth(slot, now);
-      // Move map marker
-      const videoSec2 = absTs2VideoSec(vid, tl.currentTs);
-      if(videoSec2 != null) movePositionMarkerByTs(vid.id, tl.currentTs);
     } else {
       if (slot.videos.length > 0) showSlotEmptyState(slot);
       else if (slot.paneEl) slot.paneEl.style.display = 'none';
@@ -10925,9 +10946,6 @@ function tlAnimLoop(now) {
       else slot._stuckSince = 0;
     }
   }
-  // If no panes are visible, show the empty state
-  const anyVisLoop = tl.athleteSlots.some(s => s.paneEl && s.paneEl.style.display !== 'none');
-  showNoVideo(!anyVisLoop);
 
   // Keep the phone (second) video synced every frame — it must track the master
   // video closely; the function already self-throttles its own drift seeks.
@@ -10935,10 +10953,20 @@ function tlAnimLoop(now) {
 
   // Throttle the heavier, non-critical timeline UI to ~20fps. The timeline clock and
   // video playback above still update every frame, so motion stays smooth; these
-  // panels just refresh slightly less often.
+  // panels (map markers, SOG canvas, labels, stats, layout) just refresh less often.
   const lastUi = Number(tl._lastUiRefreshAt) || 0;
   if (now - lastUi >= TIMELINE_UI_REFRESH_MS) {
     tl._lastUiRefreshAt = now;
+    for (const slot of tl.athleteSlots) {
+      if (!isVideoSlotHidden(slot) && slot.currentFileId) showSlotActiveVideo(slot);
+    }
+    // If no panes are visible, show the empty state
+    const anyVisLoop = tl.athleteSlots.some(s => s.paneEl && s.paneEl.style.display !== 'none');
+    showNoVideo(!anyVisLoop);
+    // Move map markers for the videos playing at the current time
+    for (const vid of activeVidsLoop) {
+      if (absTs2VideoSec(vid, tl.currentTs) != null) movePositionMarkerByTs(vid.id, tl.currentTs);
+    }
     syncInlineHeatmapPanelLayout();
     // Hide arrows for videos not currently playing
     syncActivePositionMarkers(activeIdsLoop);
