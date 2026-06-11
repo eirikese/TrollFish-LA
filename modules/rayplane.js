@@ -75,6 +75,44 @@ export function defaultCameraPoseAndRotation(pitch = 14.7, yaw = 0.0, roll = 0.0
   return { pos, R_wc };
 }
 
+/**
+ * Apply a manual tuning offset on top of an existing (e.g. Auto-PnP-estimated)
+ * camera pose. The angle offsets are applied in the camera's own relative frame
+ * — i.e. R_wc_new = R_wc @ Rz(dRoll) @ Ry(dYaw) @ Rx(-dPitch) — matching the
+ * convention in defaultCameraPoseAndRotation(). Position offsets add directly to
+ * the camera world position. Returns NEW arrays; inputs are not mutated.
+ *
+ * @param {number[9]} R_wc — current camera-to-world rotation (row-major 3×3)
+ * @param {number[3]} camPos — current camera world position
+ * @param {object} offset — { pitch_deg, yaw_deg, roll_deg, x_m, y_m, z_m }
+ * @returns {{R_wc:number[9], camPos:number[3]}}
+ */
+export function applyCameraPoseOffset(R_wc, camPos, offset = {}) {
+  const dPitch = Number(offset.pitch_deg) || 0;
+  const dYaw   = Number(offset.yaw_deg) || 0;
+  const dRoll  = Number(offset.roll_deg) || 0;
+  const dx = Number(offset.x_m) || 0;
+  const dy = Number(offset.y_m) || 0;
+  const dz = Number(offset.z_m) || 0;
+
+  let Rout = R_wc;
+  if (dPitch || dYaw || dRoll) {
+    const R_rel = mat3mul(rotZ(dRoll), mat3mul(rotY(dYaw), rotX(-dPitch)));
+    Rout = mat3mul(R_wc, R_rel);
+  }
+  return {
+    R_wc: Rout,
+    camPos: [camPos[0] + dx, camPos[1] + dy, camPos[2] + dz],
+  };
+}
+
+/** True if a camera_pose_offset object has any non-zero component. */
+export function cameraPoseOffsetIsActive(offset) {
+  if (!offset || typeof offset !== 'object') return false;
+  return ['pitch_deg', 'yaw_deg', 'roll_deg', 'x_m', 'y_m', 'z_m', 'hip_z_m', 'ankle_z_m']
+    .some(k => Number(offset[k]) || 0);
+}
+
 // ── Ray construction ──────────────────────────────────────────────────
 
 /**

@@ -23,6 +23,8 @@ import {
   defaultCameraPoseAndRotation,
   computePlacedSkeletonSymmetricRaycast,
   placeSkeletonOnBoat,
+  applyCameraPoseOffset,
+  cameraPoseOffsetIsActive,
 } from './rayplane.js';
 import { SkeletonPlacementKalman, KALMAN_DEFAULTS } from './skeleton-filter.js?v=20260604pose2';
 import { computeFrameMetrics, scaleSkeletonToAthleteHeight } from './skeleton-metrics.js?v=20260604pose2';
@@ -849,7 +851,12 @@ export function getActiveJobs() {
  * @returns {{ frameCount: number, outputPath: string }}
  */
 export async function processVideo(projectId, fileId, cvConfig = null, onProgress = null, opts = {}) {
-  const cfg = { ...DEFAULT_CV_CONFIG, ...(cvConfig || {}) };
+  // Accept either a bare config object or a DB cvConfig row ({project_id, config,
+  // updated_at}); unwrap the latter so per-project settings actually take effect.
+  const rawCfg = (cvConfig && typeof cvConfig === 'object' && cvConfig.config && typeof cvConfig.config === 'object')
+    ? cvConfig.config
+    : cvConfig;
+  const cfg = { ...DEFAULT_CV_CONFIG, ...(rawCfg || {}) };
   const fileRec = await DB.getFile(fileId);
   const segmentName = typeof opts.segmentName === 'string' ? opts.segmentName.trim() : '';
   const startSec = Number.isFinite(Number(opts.startSec)) ? Math.max(0, Number(opts.startSec)) : null;
@@ -975,6 +982,12 @@ export async function processVideo(projectId, fileId, cvConfig = null, onProgres
 
     const zHip = cfg.hip_plane_z ?? SKELETON_HIP_PLANE_Z;
     const zAnkle = cfg.lower_plane_z ?? SKELETON_LOWER_PLANE_Z;
+    // Manual tuning offset (Hull 3D panel) applied on top of the camera pose.
+    const poseOffset = cfg.camera_pose_offset || null;
+    const poseOffsetActive = cameraPoseOffsetIsActive(poseOffset);
+    if (poseOffsetActive) {
+      console.log(`[Pose] manual camera_pose_offset active: ${JSON.stringify(poseOffset)}`);
+    }
     const athleteMass = Number.isFinite(Number(opts.athleteWeight))
       ? Number(opts.athleteWeight)
       : (cfg.athlete_weight ?? 75);
@@ -1277,9 +1290,19 @@ export async function processVideo(projectId, fileId, cvConfig = null, onProgres
           }
         }
 
+        // Apply manual tuning offset on top of the (Auto-PnP) camera pose.
+        let camPosUsed = camPos, R_wcUsed = R_wc, zHipUsed = zHip, zAnkleUsed = zAnkle;
+        if (poseOffsetActive) {
+          const adj = applyCameraPoseOffset(R_wc, camPos, poseOffset);
+          camPosUsed = adj.camPos;
+          R_wcUsed = adj.R_wc;
+          zHipUsed = zHip + (Number(poseOffset.hip_z_m) || 0);
+          zAnkleUsed = zAnkle + (Number(poseOffset.ankle_z_m) || 0);
+        }
+
         // Place skeleton on boat
         let placed = computePlacedSkeletonSymmetricRaycast(
-          worldDict, normDict, K, imgW, imgH, camPos, R_wc, zHip, zAnkle
+          worldDict, normDict, K, imgW, imgH, camPosUsed, R_wcUsed, zHipUsed, zAnkleUsed
         );
         let placementMethod = placed ? 'raycast' : null;
         if (!placed) {

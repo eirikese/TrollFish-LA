@@ -15094,6 +15094,160 @@ const SKEL_CONNECTIONS = [
   [30,32],[27,31],[28,32]
 ];
 
+// ── Hull 3D camera-pose tuning (live preview) ──────────────────────────
+// Live-preview offset applied to displayed skeletons in the 3D viewer so the
+// user sees the effect of the tuning sliders immediately. The EXACT placement is
+// produced by re-processing with cfg.camera_pose_offset; this preview is a
+// first-order approximation (exact for pure translation): each placed world point
+// p is re-expressed as if the camera rotated by the small offset about its own
+// position and then translated — p' = R_off·(p − camPos) + camPos + posOffset.
+const STL_TUNE_DEFAULT = Object.freeze({ pitch_deg:0, yaw_deg:0, roll_deg:0, x_m:0, y_m:0, z_m:0, hip_z_m:0, ankle_z_m:0 });
+const STL_TUNE_CAM_POS = [-3.194, 0.02, 0.585]; // nominal camera world position (config default)
+let stlTunePreview = { ...STL_TUNE_DEFAULT };
+
+function stlTuneOffsetActive(o = stlTunePreview) {
+  return Object.keys(STL_TUNE_DEFAULT).some(k => Number(o?.[k]) || 0);
+}
+
+// Build a world-frame rotation matrix (row-major 9) from small pitch/yaw/roll
+// offsets, matching the camera-relative convention Rz(roll)·Ry(yaw)·Rx(-pitch)
+// projected into world axes (X fwd, Y lat, Z up).
+function stlTuneRotMat(o) {
+  const d2r = Math.PI / 180;
+  const rx = -(Number(o.pitch_deg) || 0) * d2r; // pitch about lateral (Y)
+  const ry = (Number(o.yaw_deg) || 0) * d2r;    // yaw about vertical (Z)
+  const rz = (Number(o.roll_deg) || 0) * d2r;   // roll about fore-aft (X)
+  const cx=Math.cos(rx), sx=Math.sin(rx), cy=Math.cos(ry), sy=Math.sin(ry), cz=Math.cos(rz), sz=Math.sin(rz);
+  // Compose about world axes: roll→X, yaw→Z, pitch→Y
+  const Rroll = [1,0,0, 0,cz,-sz, 0,sz,cz];
+  const Ryaw  = [cy,-sy,0, sy,cy,0, 0,0,1];
+  const Rpit  = [cx,0,sx, 0,1,0, -sx,0,cx];
+  const mul = (A,B)=>[
+    A[0]*B[0]+A[1]*B[3]+A[2]*B[6], A[0]*B[1]+A[1]*B[4]+A[2]*B[7], A[0]*B[2]+A[1]*B[5]+A[2]*B[8],
+    A[3]*B[0]+A[4]*B[3]+A[5]*B[6], A[3]*B[1]+A[4]*B[4]+A[5]*B[7], A[3]*B[2]+A[4]*B[5]+A[5]*B[8],
+    A[6]*B[0]+A[7]*B[3]+A[8]*B[6], A[6]*B[1]+A[7]*B[4]+A[8]*B[7], A[6]*B[2]+A[7]*B[5]+A[8]*B[8],
+  ];
+  return mul(Rroll, mul(Ryaw, Rpit));
+}
+
+// Apply the live-preview offset to a landmark dict {idx:[x,y,z]} → new dict.
+function stlTuneApplyPreview(lm) {
+  if (!lm || !stlTuneOffsetActive()) return lm;
+  const o = stlTunePreview;
+  const R = stlTuneRotMat(o);
+  const cp = STL_TUNE_CAM_POS;
+  const dx = Number(o.x_m)||0, dy = Number(o.y_m)||0, dz0 = Number(o.z_m)||0;
+  const hipZ = Number(o.hip_z_m)||0;
+  const out = {};
+  for (const k of Object.keys(lm)) {
+    const p = lm[k];
+    if (!p) { out[k] = p; continue; }
+    const vx = p[0]-cp[0], vy = p[1]-cp[1], vz = p[2]-cp[2];
+    const rx = R[0]*vx + R[1]*vy + R[2]*vz;
+    const ry = R[3]*vx + R[4]*vy + R[5]*vz;
+    const rz = R[6]*vx + R[7]*vy + R[8]*vz;
+    out[k] = [rx+cp[0]+dx, ry+cp[1]+dy, rz+cp[2]+dz0+hipZ];
+  }
+  return out;
+}
+
+// Slider id → (offset key, output formatter)
+const STL_TUNE_FIELDS = [
+  ['tune-pitch',  'pitch_deg', v => `${v.toFixed(1)}°`],
+  ['tune-yaw',    'yaw_deg',   v => `${v.toFixed(1)}°`],
+  ['tune-roll',   'roll_deg',  v => `${v.toFixed(1)}°`],
+  ['tune-x',      'x_m',       v => `${v.toFixed(2)} m`],
+  ['tune-y',      'y_m',       v => `${v.toFixed(2)} m`],
+  ['tune-z',      'z_m',       v => `${v.toFixed(2)} m`],
+  ['tune-hipz',   'hip_z_m',   v => `${v.toFixed(2)} m`],
+  ['tune-anklez', 'ankle_z_m', v => `${v.toFixed(2)} m`],
+];
+
+function stlTuneSyncInputsFromState() {
+  for (const [id, key, fmt] of STL_TUNE_FIELDS) {
+    const input = el(id);
+    const out = el(`${id}-out`);
+    const v = Number(stlTunePreview[key]) || 0;
+    if (input) input.value = String(v);
+    if (out) out.textContent = fmt(v);
+  }
+}
+
+function setStlTuneStatus(msg, kind = '') {
+  const elx = el('stl-tune-status');
+  if (!elx) return;
+  elx.textContent = msg;
+  elx.style.color = kind === 'ok' ? 'var(--green)' : (kind === 'err' ? 'var(--red, #e74c3c)' : 'var(--muted)');
+}
+
+// Wire the Hull 3D tuning panel. onPreviewChange re-renders displayed skeletons.
+function setupStlTuningControls(onPreviewChange) {
+  // Initialise preview from the saved per-project offset.
+  const saved = state.cvConfig?.camera_pose_offset;
+  stlTunePreview = { ...STL_TUNE_DEFAULT, ...(saved && typeof saved === 'object' ? saved : {}) };
+  stlTuneSyncInputsFromState();
+
+  for (const [id, key, fmt] of STL_TUNE_FIELDS) {
+    const input = el(id);
+    const out = el(`${id}-out`);
+    if (!input) continue;
+    input.oninput = () => {
+      const v = Number(input.value) || 0;
+      stlTunePreview[key] = v;
+      if (out) out.textContent = fmt(v);
+      onPreviewChange?.();
+      setStlTuneStatus('Live preview — Save to keep, Re-process to bake into analysis.');
+    };
+  }
+
+  const resetBtn = el('btn-tune-reset');
+  if (resetBtn) resetBtn.onclick = () => {
+    stlTunePreview = { ...STL_TUNE_DEFAULT };
+    stlTuneSyncInputsFromState();
+    onPreviewChange?.();
+    setStlTuneStatus('Reset to no offset (not yet saved).');
+  };
+
+  const saveBtn = el('btn-tune-save');
+  if (saveBtn) saveBtn.onclick = async () => {
+    try {
+      await persistCameraPoseOffset();
+      setStlTuneStatus('Saved. Re-process to apply to skeleton positions.', 'ok');
+    } catch (e) {
+      console.error('[tune] save failed', e);
+      setStlTuneStatus(`Save failed: ${e.message || e}`, 'err');
+    }
+  };
+
+  const reprocBtn = el('btn-tune-reprocess');
+  if (reprocBtn) reprocBtn.onclick = async () => {
+    try {
+      await persistCameraPoseOffset();
+      setStlTuneStatus('Saved — re-processing videos with new tuning…', 'ok');
+      // Clear the live preview so the 3D view shows the freshly-baked result,
+      // not preview-on-top-of-baked.
+      stlTunePreview = { ...STL_TUNE_DEFAULT };
+      stlTuneSyncInputsFromState();
+      onPreviewChange?.();
+      await runSkeletonForAllVideos();
+      setStlTuneStatus('Re-process complete. Tuning is baked into the saved skeletons.', 'ok');
+    } catch (e) {
+      console.error('[tune] reprocess failed', e);
+      setStlTuneStatus(`Re-process failed: ${e.message || e}`, 'err');
+    }
+  };
+}
+
+// Persist the current preview offset into the project cvConfig.
+async function persistCameraPoseOffset() {
+  if (!state.projectId) throw new Error('No project selected');
+  state.cvConfig = {
+    ...(state.cvConfig || {}),
+    camera_pose_offset: { ...STL_TUNE_DEFAULT, ...stlTunePreview },
+  };
+  await DB.upsertCvConfig(state.projectId, state.cvConfig);
+}
+
 async function loadSkeletonFrames(projectId, fileId) {
   if(!projectId || !fileId) return null;
   try {
@@ -17266,6 +17420,7 @@ async function openStlViewer() {
   function updateEntryMesh(entry, lm) {
     const { bonePos, jointPos, boneGeom, jointGeom, comSphere } = entry;
     const HIDE = -9999; // off-screen Y for missing landmarks
+    if (lm) lm = stlTuneApplyPreview(lm); // live tuning preview (no-op when offset is zero)
     if(!lm) {
       for(let i = 0; i < NJ; i++) {
         jointPos[i*3] = 0; jointPos[i*3+1] = HIDE; jointPos[i*3+2] = 0;
@@ -17574,6 +17729,17 @@ async function openStlViewer() {
   tog('stl-tog-joints', v => { for(const e of skelEntries) e.jointMesh.visible = v; });
   tog('stl-tog-com', v => { for(const e of skelEntries) e.comSphere.visible = v; });
   tog('stl-tog-grid', v => { grid.visible = v; });
+
+  // ── Camera pose tuning controls ──────────────────────────────────────
+  // Force every displayed skeleton to re-render with the current preview offset.
+  const refreshTunedMeshes = () => {
+    for (const entry of skelEntries) {
+      const lm = entry._lastFrame?.lm || entry.frames?.[0]?.lm;
+      if (lm) updateEntryMesh(entry, lm);
+    }
+    sceneNeedsRender = true;
+  };
+  setupStlTuningControls(refreshTunedMeshes);
 
   let animId;
   let lastRenderTs = 0;

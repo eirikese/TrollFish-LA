@@ -34,11 +34,24 @@ export const DEFAULT_CV_CONFIG = Object.freeze({
   contact_params: {},
   seated_x_stabilizer: {},
   lateral_y_stabilizer: {},
-  auto_camera_pnp: {  
+  auto_camera_pnp: {
     enabled: true,
     interval_frames: 10000,
     avg_frames: 5,
     min_valid_frames: 5,
+  },
+  // Manual tuning offset applied ON TOP of the (possibly Auto-PnP) camera pose,
+  // set from the Hull 3D tuning panel. Angles in degrees (camera-relative),
+  // positions/plane heights in metres. All zero = no override.
+  camera_pose_offset: {
+    pitch_deg: 0.0,
+    yaw_deg: 0.0,
+    roll_deg: 0.0,
+    x_m: 0.0,
+    y_m: 0.0,
+    z_m: 0.0,
+    hip_z_m: 0.0,
+    ankle_z_m: 0.0,
   },
 });
 
