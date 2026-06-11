@@ -11505,84 +11505,56 @@ function renderAssignList() {
     }
   }
 
-  const playbackOnlyVideos = videos.filter(v => isPlaybackOnlyVideo(v));
-  const athleteVideos = videos.filter(v => !isPlaybackOnlyVideo(v));
-
-  if(athleteVideos.length) {
+  // Videos — every video is directly assignable to an athlete. Assigning an
+  // athlete claims the video, which unlocks its GoPro GPS track and pose/video
+  // analysis (no CSV required). The "External" option keeps a clip as
+  // playback-only. Videos auto-linked through a matched CSV still resolve their
+  // athlete automatically unless overridden here.
+  if(videos.length) {
     const hdr = document.createElement('div');
     hdr.style.cssText = 'font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);padding:12px 0 4px;';
     hdr.textContent = 'Video Files';
     list.appendChild(hdr);
 
-    for(const f of athleteVideos) {
+    for(const f of videos) {
       const meta = state.fileMeta[f.id] || {};
-      let athId = meta.athlete_id;
-      let isAuto = false;
-      if(!athId && f.best_match_csv_id) {
-        const csvMeta = state.fileMeta[f.best_match_csv_id] || {};
-        athId = csvMeta.athlete_id;
-        isAuto = !!athId;
-      }
-      const ath = state.athletes.find(a => a.id === athId);
-      const card = document.createElement('div');
-      card.className = 'assign-card';
-
+      const isExternal = isPlaybackOnlyVideo(f);
       const curAthId = meta.athlete_id || '';
       const isManual = meta.manual_athlete;
-      let options = '<option value="">— Auto from CSV —</option>';
-      options += '<option value="__external__">External — not analyzed</option>';
-      for(const a of state.athletes) {
-        const sel = a.id === curAthId ? ' selected' : '';
-        options += `<option value="${a.id}"${sel}>${a.name}${a.weight ? ' (' + a.weight + 'kg)' : ''}</option>`;
+
+      // Athlete auto-inherited from a matched CSV (only relevant when not manually set / external).
+      let autoAthId = null;
+      if(!curAthId && !isExternal && f.best_match_csv_id) {
+        const csvMeta = state.fileMeta[f.best_match_csv_id] || {};
+        autoAthId = csvMeta.athlete_id || null;
       }
-      const autoText = isAuto && !isManual ? `<div class="assign-card-auto">Auto-linked via ${f.best_match_csv_id ? 'matched CSV' : ''}: ${ath?.name || '—'}</div>` : '';
-      card.innerHTML = `
-        <span class="f-kind video">VID</span>
-        <div class="assign-card-info">
-          <div class="assign-card-name">${f.filename || f.name || 'unknown'}</div>
-          ${autoText}
-        </div>
-        <select class="assign-select" data-fid="${f.id}" data-kind="video">${options}</select>
-      `;
-      const sel = card.querySelector('.assign-select');
-      sel.onchange = async () => {
-        if (sel.value === '__external__') {
-          await setVideoExternalMode(f.id, { external: true });
-          return;
-        }
-        const athId = sel.value || null;
-        await setVideoExternalMode(f.id, { external: false, athleteId: athId });
-      };
-      list.appendChild(card);
-    }
-  }
+      const autoAth = autoAthId ? state.athletes.find(a => a.id === autoAthId) : null;
 
-  if(playbackOnlyVideos.length) {
-    const hdr = document.createElement('div');
-    hdr.style.cssText = 'font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);padding:12px 0 4px;';
-    hdr.textContent = 'Playback-only Videos';
-    list.appendChild(hdr);
-
-    for(const f of playbackOnlyVideos) {
       const card = document.createElement('div');
       card.className = 'assign-card';
-      const sourceText = f.capture_ts_source === 'quicktime_user_date'
-        ? 'Synced from the embedded original capture timestamp. Pick an athlete to analyze (no CSV needed).'
-        : (f.capture_ts_source === 'quicktime_creationdate'
-          ? 'Synced from the embedded QuickTime capture timestamp. Pick an athlete to analyze (no CSV needed).'
-          : (f.capture_ts_source === 'quicktime_mvhd'
-            ? 'Synced from the QuickTime movie header timestamp. Pick an athlete to analyze (no CSV needed).'
-            : 'Shown on the timeline for playback only. Pick an athlete to analyze (no CSV needed).'));
+
+      let options = '<option value="">— Select athlete to analyze —</option>';
+      for(const a of state.athletes) {
+        const sel = (!isExternal && a.id === curAthId) ? ' selected' : '';
+        options += `<option value="${a.id}"${sel}>${a.name}${a.weight ? ' (' + a.weight + 'kg)' : ''}</option>`;
+      }
+      const extSel = isExternal ? ' selected' : '';
+      options += `<option value="__external__"${extSel}>External — not analyzed</option>`;
+
+      let subText = '';
+      if(isExternal) {
+        subText = '<div class="assign-card-auto">Playback only. Pick an athlete to enable GPS + video analysis (no CSV needed).</div>';
+      } else if(autoAth && !isManual) {
+        subText = `<div class="assign-card-auto">Auto-linked via matched CSV: ${autoAth.name}</div>`;
+      }
+
       card.innerHTML = `
         <span class="f-kind video">VID</span>
         <div class="assign-card-info">
           <div class="assign-card-name">${f.filename || f.name || 'unknown'}</div>
-          <div class="assign-card-auto">${sourceText}</div>
+          ${subText}
         </div>
-        <select class="assign-select" data-fid="${f.id}" data-kind="video">
-          <option value="__external__" selected>External — not analyzed</option>
-          ${state.athletes.map(a => `<option value="${a.id}">${a.name}${a.weight ? ` (${a.weight}kg)` : ''}</option>`).join('')}
-        </select>
+        <select class="assign-select" data-fid="${f.id}" data-kind="video">${options}</select>
       `;
       const sel = card.querySelector('.assign-select');
       sel.onchange = async () => {
