@@ -5529,7 +5529,7 @@ function buildManeuverStatsBlock(title, stats) {
         ['Avg SOG', formatManeuverNumber(stats?.avgSogKts, { digits: 1, suffix: ' kt' })],
         ['Avg VMG', formatManeuverNumber(stats?.avgVmgKts, { digits: 1, suffix: ' kt' })],
         ['Abs TWA', formatManeuverNumber(stats?.avgAbsTwaDeg, { digits: 1, suffix: '°' })],
-        ['Heading Δ', formatManeuverNumber(stats?.headingDeltaDeg, { digits: 1, suffix: '°' })],
+        ['COG Δ', formatManeuverNumber(stats?.headingDeltaDeg, { digits: 1, suffix: '°' })],
         ['Avg RA', formatManeuverNumber(stats?.avgRudderDeg, { digits: 1, suffix: '°' })],
         ['Avg BA', formatManeuverNumber(stats?.avgBoomDeg, { digits: 1, suffix: '°' })],
         ['Entry speed', formatManeuverNumber(stats?.entrySpeedKts, { digits: 1, suffix: ' kt' })],
@@ -5540,7 +5540,7 @@ function buildManeuverStatsBlock(title, stats) {
           ['Avg SOG', formatManeuverNumber(stats?.avgSogKts, { digits: 1, suffix: ' kt' })],
           ['Avg VMG', formatManeuverNumber(stats?.avgVmgKts, { digits: 1, suffix: ' kt' })],
           ['Abs TWA', formatManeuverNumber(stats?.avgAbsTwaDeg, { digits: 1, suffix: '°' })],
-          ['Heading Δ', formatManeuverNumber(stats?.headingDeltaDeg, { digits: 1, suffix: '°' })],
+          ['COG Δ', formatManeuverNumber(stats?.headingDeltaDeg, { digits: 1, suffix: '°' })],
           ['Avg RA', formatManeuverNumber(stats?.avgRudderDeg, { digits: 1, suffix: '°' })],
           ['Avg BA', formatManeuverNumber(stats?.avgBoomDeg, { digits: 1, suffix: '°' })],
           ['Min speed', formatManeuverNumber(stats?.minSpeedKts, { digits: 1, suffix: ' kt' })],
@@ -5549,7 +5549,7 @@ function buildManeuverStatsBlock(title, stats) {
           ['Avg SOG', formatManeuverNumber(stats?.avgSogKts, { digits: 1, suffix: ' kt' })],
           ['Avg VMG', formatManeuverNumber(stats?.avgVmgKts, { digits: 1, suffix: ' kt' })],
           ['Abs TWA', formatManeuverNumber(stats?.avgAbsTwaDeg, { digits: 1, suffix: '°' })],
-          ['Heading Δ', formatManeuverNumber(stats?.headingDeltaDeg, { digits: 1, suffix: '°' })],
+          ['COG Δ', formatManeuverNumber(stats?.headingDeltaDeg, { digits: 1, suffix: '°' })],
           ['Avg RA', formatManeuverNumber(stats?.avgRudderDeg, { digits: 1, suffix: '°' })],
           ['Avg BA', formatManeuverNumber(stats?.avgBoomDeg, { digits: 1, suffix: '°' })],
           ['Exit speed', formatManeuverNumber(stats?.exitSpeedKts, { digits: 1, suffix: ' kt' })],
@@ -5601,7 +5601,7 @@ function buildManeuverSummaryGrid(maneuver) {
       sub: `Min ${formatManeuverNumber(maneuver?.duringStats?.minSpeedKts, { digits: 1, suffix: ' kt' })}`,
     },
     {
-      label: 'Heading Delta',
+      label: 'COG Delta',
       value: formatManeuverNumber(maneuver?.heading_delta_deg, { digits: 1, suffix: '°' }),
       sub: `${maneuver?.side_from || '?'} to ${maneuver?.side_to || '?'}`,
     },
@@ -8985,7 +8985,7 @@ const TIMELINE_STAT_DEFS = Object.freeze([
     overlayLabel: 'TWA',
     title: 'Live true wind angle from current motion direction against the estimated wind',
   },
-  { key: 'heading', label: 'Heading', suffix: '\u00B0', seriesKey: 'heading', overlayLabel: 'HDG' },
+  { key: 'heading', label: 'COG', suffix: '\u00B0', seriesKey: 'heading', overlayLabel: 'COG' },
   { key: 'heel', label: 'Heel', suffix: '\u00B0', seriesKey: 'heel', overlayLabel: 'Heel' },
   { key: 'pitch', label: 'Pitch', suffix: '\u00B0', seriesKey: 'pitch', overlayLabel: 'Pitch' },
   { key: 'roll', label: 'Roll M', suffix: ' Nm', seriesKey: 'roll', overlayLabel: 'RM' },
@@ -9929,7 +9929,7 @@ function updateTimelineStats(force = false) {
     assignTimelineOverlayGraphSlots(new Set(), slots);
   }
   if (refreshProcessedStats) markProcessedTimelineStatsRefresh(currentTs, windowSec);
-  wrap.title = 'SOG / Heel / Pitch show the nearest sample; Heading / Roll M / Trunk / Rudder / Boom show nearest available sample; VMG shows absolute value and TWA uses current motion direction against the estimated wind';
+  wrap.title = 'SOG / Heel / Pitch show the nearest sample; COG / Roll M / Trunk / Rudder / Boom show nearest available sample; VMG shows absolute value and TWA uses current motion direction against the estimated wind';
 
   for (const slot of slots) {
     const refs = slot._timelineStatEls;

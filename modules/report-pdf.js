@@ -2761,7 +2761,7 @@ function renderTackTimelineChart(tack, athleteColor = PALETTE[0]) {
     { key: 'trunk', label: 'Trunk (deg)', color: '#d62728', fallback: [25, 75] },
     { key: 'rudder', label: 'Rudder (deg)', color: '#ff7f0e', fallback: [-25, 25] },
     { key: 'boom', label: 'Boom (deg)', color: '#17becf', fallback: [-180, 180] },
-    { key: 'heading', label: 'Heading Delta (deg)', color: '#9467bd', fallback: [-35, 35] },
+    { key: 'heading', label: 'COG Delta (deg)', color: '#9467bd', fallback: [-35, 35] },
     { key: 'sog', label: 'SOG (kts)', color: '#2ca02c', fallback: [4, 8] },
   ];
 
@@ -2936,7 +2936,7 @@ function renderTackTimelineChart(tack, athleteColor = PALETTE[0]) {
   const sideTo = String(tack?.side_to || '?');
   const hdgDelta = Number(tack?.heading_delta_deg);
   const hdgTxt = Number.isFinite(hdgDelta) ? `${hdgDelta.toFixed(1)} deg` : 'n/a';
-  ctx.fillText(`${moveLabel} ${sideFrom} -> ${sideTo} | Heading change ${hdgTxt} | 5s before / 5s after`, 10, 12);
+  ctx.fillText(`${moveLabel} ${sideFrom} -> ${sideTo} | COG change ${hdgTxt} | 5s before / 5s after`, 10, 12);
 
   return encodeCanvasPng(canvas);
 }
@@ -3018,7 +3018,7 @@ function drawSegmentManeuverAnalysisPages(pdf, segGroup, athleteColorMap, margin
     const dt = Number(tack.duration_s);
     const moveLabel = String(tack?.type || '') === 'jibe' ? 'Jibe' : 'Tack';
     pdf.text(
-      `${idx + 1}. ${tack.athlete}  |  ${moveLabel}  |  start ${Number.isFinite(t0) ? t0.toFixed(1) : '--'}s  |  duration ${Number.isFinite(dt) ? dt.toFixed(2) : '--'}s  |  dHeading ${Number.isFinite(hdgDelta) ? hdgDelta.toFixed(1) : '--'} deg`,
+      `${idx + 1}. ${tack.athlete}  |  ${moveLabel}  |  start ${Number.isFinite(t0) ? t0.toFixed(1) : '--'}s  |  duration ${Number.isFinite(dt) ? dt.toFixed(2) : '--'}s  |  dCOG ${Number.isFinite(hdgDelta) ? hdgDelta.toFixed(1) : '--'} deg`,
       margin,
       y + 4
     );
