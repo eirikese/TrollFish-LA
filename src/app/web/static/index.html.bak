@@ -1,0 +1,501 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TrollFish — Session Explorer</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #0e1117; --surface: #161b22; --surface2: #1f2937; --border: #30363d;
+      --accent: #1d8fd8; --accent-h: #45aef5; --green: #2ea043; --red: #e84040;
+      --yellow: #d29922; --orange: #e86030; --text: #e6edf3; --muted: #8b949e;
+      --radius: 6px;
+    }
+    html, body { height: 100%; background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 14px; overflow: hidden; }
+    /* Topbar */
+    #topbar { display: flex; align-items: center; gap: 8px; flex-shrink: 0; padding: 0 12px; height: 48px; background: var(--surface); border-bottom: 1px solid var(--border); position: relative; }
+    .brand { font-weight: 700; font-size: 15px; color: var(--accent); margin-right: 4px; white-space: nowrap; }
+    #topbar select { background: var(--surface2); border: 1px solid var(--border); color: var(--text); border-radius: var(--radius); padding: 4px 8px; font-size: 13px; min-width: 200px; }
+    .spacer { flex: 1; }
+    .btn { display: inline-flex; align-items: center; gap: 5px; padding: 5px 11px; border-radius: var(--radius); border: 1px solid var(--border); background: var(--surface2); color: var(--text); cursor: pointer; font-size: 13px; font-weight: 500; transition: background .12s, border-color .12s; white-space: nowrap; line-height: 1; }
+    .btn:hover { background: var(--surface); border-color: var(--accent); color: var(--accent-h); }
+    .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .btn.primary:hover { background: var(--accent-h); }
+    .btn.danger { background: var(--red); border-color: var(--red); color: #fff; }
+    .btn.danger:hover { background: #ff5555; }
+    .btn.sm { padding: 3px 8px; font-size: 12px; }
+    .btn:disabled { opacity: .4; cursor: not-allowed; pointer-events: none; }
+    #job-badge { font-size: 12px; padding: 2px 8px; border-radius: 12px; background: var(--surface2); border: 1px solid var(--border); white-space: nowrap; }
+    #job-badge.running { background: rgba(29,143,216,.15); border-color: var(--accent); color: var(--accent); }
+    #job-badge.completed { background: rgba(46,160,67,.12); border-color: var(--green); color: var(--green); }
+    #job-badge.failed { background: rgba(232,64,64,.12); border-color: var(--red); color: var(--red); }
+    /* Upload strip */
+    #upload-strip { height: 3px; background: transparent; position: absolute; bottom: 0; left: 0; right: 0; }
+    #upload-fill { height: 100%; width: 0%; background: var(--accent); transition: width .08s; }
+    /* Layout */
+    #layout { display: flex; height: calc(100vh - 48px); overflow: hidden; }
+    /* Left */
+    #panel-left { display: flex; flex-direction: column; width: 58%; min-width: 280px; flex-shrink: 0; }
+    #map { flex: 1; min-height: 0; position: relative; }
+    /* Speed legend */
+    #speed-legend { position: absolute; bottom: 8px; left: 8px; background: rgba(14,17,23,.85); border: 1px solid var(--border); border-radius: 6px; padding: 7px 10px; z-index: 800; pointer-events: none; font-size: 11px; display: none; }
+    #speed-legend div { display: flex; align-items: center; gap: 6px; margin-bottom: 3px; }
+    .sp-swatch { width: 22px; height: 7px; border-radius: 2px; flex-shrink: 0; }
+    /* Map controls */
+    #map-controls { background: var(--surface); border-top: 1px solid var(--border); flex-shrink: 0; }
+    #wind-row { display: flex; align-items: center; gap: 8px; padding: 5px 10px; flex-wrap: wrap; }
+    #wind-row label { font-size: 12px; color: var(--muted); }
+    .btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+    .hdg-marker { transition: transform .15s linear; transform-origin: center; }
+    #wind-deg { min-width: 32px; text-align: right; font-size: 12px; font-variant-numeric: tabular-nums; color: var(--muted); }
+    #wind-compass { width: 28px; height: 28px; flex-shrink: 0; cursor: grab; user-select: none; }
+    .map-check { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 4px; cursor: pointer; }
+    .map-check input { accent-color: var(--accent); }
+    #seg-legend-row { display: flex; align-items: center; gap: 10px; padding: 3px 10px 7px; flex-wrap: wrap; display: none; }
+    .seg-item { display: flex; align-items: center; gap: 4px; font-size: 11px; color: var(--muted); }
+    .seg-swatch { width: 14px; height: 7px; border-radius: 2px; }
+    /* Day filter */
+    #day-filter-row { display: none; align-items: center; gap: 5px; padding: 2px 10px 5px; flex-wrap: wrap; }
+    #day-filter-row.has-days { display: flex; }
+    .day-btn { padding: 2px 10px; border-radius: 12px; border: 1px solid var(--border); background: var(--surface2); color: var(--muted); font-size: 11px; cursor: pointer; white-space: nowrap; }
+    .day-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+    /* Track visibility panel */
+    #track-panel { border-top: 1px solid var(--border); background: var(--surface); overflow: hidden; transition: max-height .2s; }
+    #track-panel.collapsed { max-height: 26px; }
+    #track-panel-hdr { display: flex; align-items: center; gap: 6px; padding: 4px 10px; font-size: 11px; color: var(--muted); cursor: pointer; user-select: none; }
+    #track-panel-hdr:hover { color: var(--text); }
+    #track-panel-list { padding: 0 10px 6px; max-height: 100px; overflow-y: auto; }
+    #track-panel-list::-webkit-scrollbar { width: 4px; } #track-panel-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+    .trk-row { display: flex; align-items: center; gap: 6px; padding: 2px 0; font-size: 12px; }
+    .trk-eye { cursor: pointer; font-size: 13px; opacity: .45; line-height: 1; flex-shrink: 0; }
+    .trk-eye.on { opacity: 1; }
+    .trk-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+    .trk-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+    .trk-badge { font-size: 10px; padding: 1px 5px; border-radius: 3px; font-weight: 700; text-transform: uppercase; flex-shrink: 0; }
+    .trk-badge.vid { background: rgba(29,143,216,.2); color: var(--accent); }
+    .trk-badge.csv { background: rgba(46,160,67,.2); color: var(--green); }
+    .trk-link { font-size: 11px; opacity: .55; cursor: default; flex-shrink: 0; }
+    .trk-day { font-size: 10px; color: var(--muted); flex-shrink: 0; }
+    /* Files day group header */
+    .day-group-hdr { padding: 5px 9px 3px; font-size: 11px; font-weight: 600; color: var(--muted); letter-spacing: .05em; text-transform: uppercase; }
+    /* STL resize handle */
+    #stl-resize-handle { width: 100%; height: 5px; background: var(--border); cursor: ns-resize; flex-shrink: 0; display: none; }
+    #stl-resize-handle:hover, #stl-resize-handle.dragging { background: var(--accent); }
+    #panel-left.stl-open #stl-resize-handle { display: block; }
+    /* Named splits */
+    .split-section { border-top: 1px solid var(--border); margin-top: 5px; padding: 4px 0 2px; }
+    .split-section-hdr { font-size: 10px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; padding: 2px 0 3px; }
+    .split-item { display: flex; align-items: center; gap: 5px; padding: 2px 0; font-size: 12px; }
+    .split-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; color: var(--text); }
+    .split-name:hover { color: var(--accent); }
+    .split-range { font-size: 11px; color: var(--muted); white-space: nowrap; }
+    .split-del { background: none; border: none; color: var(--red); opacity: .4; cursor: pointer; font-size: 12px; padding: 0 2px; flex-shrink: 0; }
+    .split-del:hover { opacity: 1; }
+    .split-label-icon { background: rgba(14,17,23,.9); border: 1px solid rgba(255,255,255,.2); border-radius: 3px; padding: 1px 6px; font-size: 11px; font-weight: 600; white-space: nowrap; cursor: pointer; }
+    /* Split name modal */
+    #split-modal { position: fixed; inset: 0; z-index: 2000; background: rgba(0,0,0,.55); display: none; align-items: center; justify-content: center; }
+    #split-modal.open { display: flex; }
+    #split-modal-box { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 20px; min-width: 300px; }
+    #split-modal-box h3 { margin-bottom: 8px; font-size: 14px; }
+    #split-modal-range { font-size: 12px; color: var(--muted); margin-bottom: 12px; }
+    #split-name-in { width: 100%; margin-bottom: 12px; padding: 7px 10px; background: var(--surface2); border: 1px solid var(--border); color: var(--text); border-radius: var(--radius); font-size: 14px; }
+    /* Divider */
+    #divider { width: 5px; background: var(--border); cursor: col-resize; flex-shrink: 0; }
+    #divider:hover, #divider.dragging { background: var(--accent); }
+    /* Right */
+    #panel-right { flex: 1; display: flex; flex-direction: column; min-width: 260px; overflow: hidden; }
+    #right-tabs { display: flex; border-bottom: 1px solid var(--border); background: var(--surface); flex-shrink: 0; }
+    .tab-btn { padding: 9px 14px; border: none; background: none; color: var(--muted); cursor: pointer; font-size: 13px; font-weight: 500; border-bottom: 2px solid transparent; }
+    .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+    #right-content { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
+    .tab-panel { display: none; flex-direction: column; height: 100%; overflow: hidden; }
+    .tab-panel.active-tab { display: flex; }
+    /* Video */
+    #video-chip-bar { padding: 5px 8px; background: var(--surface); border-bottom: 1px solid var(--border); display: flex; gap: 5px; flex-wrap: nowrap; overflow-x: auto; flex-shrink: 0; }
+    #video-chip-bar::-webkit-scrollbar { height: 4px; }
+    #video-chip-bar::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+    .v-chip { display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; padding: 3px 9px; border-radius: 14px; border: 1px solid var(--border); background: var(--surface2); cursor: pointer; font-size: 12px; max-width: 150px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .v-chip.active { border-color: var(--accent); color: var(--accent); }
+    .cv-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; background: var(--muted); }
+    .cv-dot.ok { background: var(--green); }
+    .cv-dot.running { background: var(--yellow); }
+    .cv-dot.failed { background: var(--red); }
+    #video-wrap { flex: 1; background: #000; display: flex; align-items: center; justify-content: center; min-height: 0; position: relative; }
+    #video-player { width: 100%; height: 100%; object-fit: contain; display: none; }
+    .empty-state { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: var(--muted); font-size: 13px; text-align: center; padding: 16px; }
+    #video-controls { background: var(--surface); border-top: 1px solid var(--border); flex-shrink: 0; padding: 7px 10px; display: flex; flex-direction: column; gap: 5px; }
+    #seek-row { display: flex; align-items: center; gap: 8px; }
+    #video-time { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; min-width: 100px; }
+    #video-seek { flex: 1; accent-color: var(--accent); }
+    #ctrl-row { display: flex; align-items: center; gap: 6px; }
+    #btn-play-pause { font-size: 18px; padding: 4px 12px; }
+    #ctrl-right { display: flex; align-items: center; gap: 5px; margin-left: auto; }
+    #speed-select { background: var(--surface2); border: 1px solid var(--border); color: var(--text); border-radius: var(--radius); padding: 3px 6px; font-size: 12px; }
+    /* Files tab */
+    #files-wrap { flex: 1; overflow-y: auto; padding: 6px; }
+    #files-wrap::-webkit-scrollbar { width: 5px; }
+    #files-wrap::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+    .file-item { display: flex; align-items: center; gap: 6px; padding: 7px 9px; border-radius: var(--radius); background: var(--surface2); border: 1px solid transparent; margin-bottom: 3px; }
+    .file-item:hover { border-color: var(--border); }
+    .f-kind { font-size: 10px; padding: 1px 5px; border-radius: 3px; font-weight: 700; text-transform: uppercase; flex-shrink: 0; }
+    .f-kind.video { background: rgba(29,143,216,.2); color: var(--accent); }
+    .f-kind.csv { background: rgba(46,160,67,.2); color: var(--green); }
+    .f-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; cursor: pointer; }
+    .f-name:hover { color: var(--accent); }
+    .f-size { font-size: 11px; color: var(--muted); flex-shrink: 0; }
+    .f-cv { font-size: 11px; flex-shrink: 0; }
+    .f-cv.ok { color: var(--green); }
+    .f-cv.running { color: var(--yellow); }
+    .f-cv.failed { color: var(--red); }
+    .f-athlete-tag { font-size: 11px; color: var(--muted); background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 1px 7px; flex-shrink: 0; max-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+    .f-del-btn { color: var(--red); background: none; border: none; cursor: pointer; font-size: 14px; padding: 2px 4px; border-radius: 3px; opacity: .5; flex-shrink: 0; }
+    .f-del-btn:hover { opacity: 1; background: rgba(232,64,64,.12); }
+    #proc-footer { padding: 8px 10px; background: var(--surface); border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 5px; flex-shrink: 0; }
+    #proc-prog-row { display: flex; align-items: center; gap: 8px; display: none; }
+    .prog-bar { flex: 1; height: 5px; background: var(--border); border-radius: 3px; overflow: hidden; }
+    .prog-fill { height: 100%; background: var(--accent); border-radius: 3px; width: 0%; transition: width .3s; }
+    #proc-pct { font-size: 11px; color: var(--muted); min-width: 32px; text-align: right; }
+    #proc-msg { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    /* Athletes tab */
+    #ath-list { flex: 1; overflow-y: auto; padding: 6px; }
+    .ath-item { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: var(--radius); background: var(--surface2); margin-bottom: 4px; border: 1px solid var(--border); }
+    .ath-color { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; }
+    .ath-name { flex: 1; font-size: 13px; font-weight: 500; }
+    .ath-weight { font-size: 12px; color: var(--muted); flex-shrink: 0; min-width: 38px; text-align: right; }
+    .ath-del { color: var(--red); background: none; border: none; cursor: pointer; font-size: 13px; opacity: .5; flex-shrink: 0; }
+    .ath-del:hover { opacity: 1; }
+    #ath-footer { padding: 8px 10px; background: var(--surface); border-top: 1px solid var(--border); flex-shrink: 0; display: flex; flex-direction: column; gap: 6px; }
+    #ath-edit-row { display: none; flex-direction: row; gap: 5px; align-items: center; }
+    #ath-edit-row.open { display: flex; }
+    #ath-name-in { flex: 1; background: var(--surface2); border: 1px solid var(--border); color: var(--text); border-radius: var(--radius); padding: 5px 8px; font-size: 13px; }
+    #ath-weight-in { width: 70px; background: var(--surface2); border: 1px solid var(--border); color: var(--text); border-radius: var(--radius); padding: 5px 8px; font-size: 13px; }
+    /* STL 3-D Viewer — inline panel below map */
+    #stl-inline { display: none; flex-direction: column; flex: 0 0 50%; min-height: 0; overflow: hidden; border-top: 1px solid #202838; }
+    #stl-inline.open { display: flex; }
+    /* When STL is open the map shrinks to share left-column space */
+    #panel-left.stl-open #map { flex: 0 0 50%; }
+    #stl-header { display: flex; align-items: center; padding: 0 12px; height: 34px; background: linear-gradient(90deg,#11151c,#141b26); border-bottom: 1px solid #202838; gap: 10px; flex-shrink: 0; }
+    #stl-header h2 { font-size: 12px; font-weight: 600; flex: 1; margin: 0; color: #9aa7b2; letter-spacing: .04em; }
+    /* 2-column grid: left panel | 3D canvas */
+    #stl-layout { flex: 1; display: grid; grid-template-columns: 220px 1fr; grid-template-rows: 1fr; min-height: 0; }
+    /* Left panel */
+    #stl-panel { background: #171a21; border-right: 1px solid #202838; display: flex; flex-direction: column; overflow-y: auto; min-height: 0; }
+    .stl-sec { padding: 10px 12px; border-bottom: 1px solid #202838; display: flex; flex-direction: column; gap: 6px; }
+    .stl-sec h3 { margin: 0; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .08em; color: #9aa7b2; }
+    /* 3D canvas */
+    #stl-3d-wrap { position: relative; overflow: hidden; min-height: 0; }
+    #stl-3d-wrap canvas { display: block; width: 100%; height: 100%; }
+    /* Camera preset grid */
+    .stl-cam-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
+    .stl-cam-btn { background: #1e2430; border: 1px solid #283249; color: #e8edf2; padding: 5px 4px; border-radius: 6px; font-size: 11px; cursor: pointer; text-align: center; }
+    .stl-cam-btn:hover { border-color: #5cc8ff; }
+    /* Live metrics */
+    .stl-metric { display: flex; justify-content: space-between; align-items: center; font-size: 12px; color: #9aa7b2; }
+    .stl-metric strong { color: #e8edf2; font-weight: 600; font-variant-numeric: tabular-nums; }
+    /* Trunk dial */
+    .stl-dial-wrap { display: flex; flex-direction: column; align-items: center; gap: 2px; }
+    .stl-dial-val { font-size: 18px; font-weight: 700; color: #5cc8ff; font-variant-numeric: tabular-nums; }
+    /* Visibility toggles */
+    .stl-tog-row { display: flex; align-items: center; justify-content: space-between; padding: 3px 0; font-size: 12px; color: #e8edf2; cursor: pointer; }
+    .stl-tog { position: relative; width: 34px; height: 18px; flex-shrink: 0; }
+    .stl-tog input { opacity: 0; width: 0; height: 0; position: absolute; }
+    .stl-tog-sl { position: absolute; cursor: pointer; inset: 0; background: #283249; border-radius: 18px; transition: .25s; }
+    .stl-tog-sl:before { position: absolute; content: ''; height: 12px; width: 12px; left: 3px; bottom: 3px; background: #9aa7b2; border-radius: 50%; transition: .25s; }
+    .stl-tog input:checked + .stl-tog-sl { background: #5cc8ff; }
+    .stl-tog input:checked + .stl-tog-sl:before { transform: translateX(16px); background: #fff; }
+    /* Skeleton status badge */
+    #stl-skel-status { font-size: 12px; color: #9aa7b2; text-align: center; padding: 6px; }
+    #stl-skel-status.ok { color: #7affc8; }
+    /* Confirm modal */
+    .modal-ov { display: none; position: fixed; inset: 0; z-index: 900; background: rgba(0,0,0,.6); align-items: center; justify-content: center; }
+    .modal-ov.open { display: flex; }
+    .modal-box { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 22px; min-width: 310px; max-width: 420px; }
+    .modal-box h3 { margin-bottom: 10px; font-size: 15px; }
+    .modal-box p { font-size: 13px; color: var(--muted); margin-bottom: 16px; line-height: 1.5; }
+    .modal-box input { width: 100%; margin-bottom: 14px; padding: 7px 10px; background: var(--surface2); border: 1px solid var(--border); color: var(--text); border-radius: var(--radius); font-size: 14px; }
+    .modal-box .btn-row { display: flex; gap: 8px; justify-content: flex-end; }
+    /* Assign athlete popup */
+    #assign-popup { position: fixed; z-index: 500; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 6px; min-width: 160px; box-shadow: 0 4px 16px rgba(0,0,0,.5); display: none; }
+    .assign-opt { padding: 5px 9px; border-radius: 4px; cursor: pointer; font-size: 13px; }
+    .assign-opt:hover { background: var(--surface2); }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+    .leaflet-container { background: #111820; }
+    .pos-dot { width: 10px; height: 10px; border-radius: 50%; border: 2px solid #fff; box-shadow: 0 0 5px rgba(255,50,50,.8); }
+  </style>
+</head>
+<body>
+
+<!-- Topbar -->
+<div id="topbar">
+  <span class="brand">⛵ TrollFish</span>
+  <select id="project-select"><option value="">— select project —</option></select>
+  <button class="btn" id="btn-new-proj">+ New</button>
+  <button class="btn danger sm" id="btn-del-proj" disabled title="Delete project">🗑</button>
+  <button class="btn" id="btn-upload" disabled>⬆ Upload</button>
+  <button class="btn" id="btn-process" disabled>▶ Process</button>
+  <input type="file" id="file-input" multiple accept=".mp4,.mov,.csv" style="display:none" />
+  <span class="spacer"></span>
+  <span id="job-badge" style="display:none"></span>
+  <button class="btn" id="btn-stl">🚢 Hull 3D</button>
+  <div id="upload-strip"><div id="upload-fill"></div></div>
+</div>
+
+<div id="layout">
+  <!-- Left: Map -->
+  <div id="panel-left">
+    <div id="map">
+      <div id="speed-legend">
+        <div style="font-size:12px;font-weight:600;margin-bottom:4px;">Speed (kt)</div>
+        <div><span class="sp-swatch" style="background:#3b82f6"></span>&lt; 4</div>
+        <div><span class="sp-swatch" style="background:#22c55e"></span>4–6</div>
+        <div><span class="sp-swatch" style="background:#eab308"></span>6–8</div>
+        <div><span class="sp-swatch" style="background:#f97316"></span>8–10</div>
+        <div><span class="sp-swatch" style="background:#ef4444"></span>&gt; 10</div>
+      </div>
+    </div>
+    <div id="map-controls">
+      <div id="wind-row">
+        <label>💨</label>
+        <svg id="wind-compass" viewBox="0 0 36 36">
+          <circle cx="18" cy="18" r="16" fill="none" stroke="#30363d" stroke-width="1.5"/>
+          <text x="18" y="7" text-anchor="middle" fill="#8b949e" font-size="7">N</text>
+          <text x="18" y="32" text-anchor="middle" fill="#8b949e" font-size="7">S</text>
+          <text x="31" y="20" text-anchor="middle" fill="#8b949e" font-size="7">E</text>
+          <text x="5" y="20" text-anchor="middle" fill="#8b949e" font-size="7">W</text>
+          <g id="compass-arrow"><polygon points="18,4 15,20 18,18 21,20" fill="#1d8fd8"/><polygon points="18,32 15,16 18,18 21,16" fill="#444"/></g>
+        </svg>
+        <span id="wind-deg">0°</span>
+        <label class="map-check"><input type="checkbox" id="seg-toggle" /> Segs</label>
+        <label class="map-check"><input type="checkbox" id="speed-toggle" /> Speed</label>
+        <button class="btn sm" id="btn-range-mode" title="Click to activate range selection">🎯 Range</button>
+        <span id="range-info" style="display:none;font-size:11px;color:var(--muted);margin-left:4px;"></span>
+        <button class="btn sm" id="btn-clear-range" style="display:none;">✕</button>
+        <button class="btn sm primary" id="btn-proc-range" style="display:none;">▶ Process Range</button>
+        <button class="btn sm" id="btn-label-split" style="display:none;">📌 Label Split</button>
+      </div>
+      <div id="seg-legend-row">
+        <span class="seg-item"><span class="seg-swatch" style="background:#ef4444"></span>Upwind &lt;45°</span>
+        <span class="seg-item"><span class="seg-swatch" style="background:#f97316"></span>Close reach 45–90°</span>
+        <span class="seg-item"><span class="seg-swatch" style="background:#eab308"></span>Beam reach 90–135°</span>
+        <span class="seg-item"><span class="seg-swatch" style="background:#22c55e"></span>Downwind &gt;135°</span>
+      </div>
+      <div id="day-filter-row"></div>
+      <div id="track-panel" class="collapsed">
+        <div id="track-panel-hdr">▸ Tracks</div>
+        <div id="track-panel-list"></div>
+      </div>
+    </div>
+
+    <div id="stl-resize-handle"></div>
+
+    <!-- STL 3D panel — appears below map when open -->
+    <div id="stl-inline">
+      <div id="stl-header">
+        <h2>🚢 Hull + Skeleton 3D</h2>
+        <button class="btn sm" id="btn-stl-close">✕ Close</button>
+      </div>
+      <div id="stl-layout">
+
+        <!-- ── Left panel ─────────────────────────────────────── -->
+        <aside id="stl-panel">
+
+          <div class="stl-sec">
+            <h3>Trunk Angle</h3>
+            <div class="stl-dial-wrap">
+              <svg viewBox="0 0 120 80" width="110" height="75">
+                <path d="M 15 70 A 50 50 0 0 1 105 70" fill="none" stroke="#283249" stroke-width="8" stroke-linecap="round"/>
+                <line id="stl-dial-needle" x1="60" y1="70" x2="60" y2="25" stroke="#5cc8ff" stroke-width="3" stroke-linecap="round"/>
+                <circle cx="60" cy="70" r="5" fill="#e8edf2"/>
+                <text x="10" y="78" fill="#9aa7b2" font-size="10">0°</text>
+                <text x="97" y="78" fill="#9aa7b2" font-size="10">90°</text>
+              </svg>
+              <div class="stl-dial-val" id="stl-dial-val">--.-°</div>
+            </div>
+          </div>
+
+          <div class="stl-sec">
+            <h3>Live Metrics</h3>
+            <div class="stl-metric"><span>Trunk °</span><strong id="stl-m-trunk">--</strong></div>
+            <div class="stl-metric"><span>COM X (m)</span><strong id="stl-m-hipx">--</strong></div>
+            <div class="stl-metric"><span>COM Y (m)</span><strong id="stl-m-hipy">--</strong></div>
+            <div class="stl-metric"><span>COM Z (m)</span><strong id="stl-m-hipz">--</strong></div>
+          </div>
+
+          <div class="stl-sec">
+            <h3>Camera</h3>
+            <div class="stl-cam-grid">
+              <button class="stl-cam-btn" onclick="window.stlSetCamera('default')">↗ Default</button>
+              <button class="stl-cam-btn" onclick="window.stlSetCamera('side')">◁ Side</button>
+              <button class="stl-cam-btn" onclick="window.stlSetCamera('top')">▽ Top</button>
+              <button class="stl-cam-btn" onclick="window.stlSetCamera('front')">▷ Bow</button>
+              <button class="stl-cam-btn" onclick="window.stlSetCamera('rear')">◁ Stern</button>
+              <button class="stl-cam-btn" onclick="window.stlSetCamera('athlete')">🧑 Athlete</button>
+            </div>
+          </div>
+
+          <div class="stl-sec">
+            <h3>Visibility</h3>
+            <label class="stl-tog-row">
+              <span>Hull</span>
+              <span class="stl-tog"><input type="checkbox" id="stl-tog-hull" checked><span class="stl-tog-sl"></span></span>
+            </label>
+            <label class="stl-tog-row">
+              <span>Skeleton bones</span>
+              <span class="stl-tog"><input type="checkbox" id="stl-tog-skel" checked><span class="stl-tog-sl"></span></span>
+            </label>
+            <label class="stl-tog-row">
+              <span>Joints</span>
+              <span class="stl-tog"><input type="checkbox" id="stl-tog-joints" checked><span class="stl-tog-sl"></span></span>
+            </label>
+            <label class="stl-tog-row">
+              <span>COM sphere</span>
+              <span class="stl-tog"><input type="checkbox" id="stl-tog-com" checked><span class="stl-tog-sl"></span></span>
+            </label>
+            <label class="stl-tog-row">
+              <span>Grid</span>
+              <span class="stl-tog"><input type="checkbox" id="stl-tog-grid" checked><span class="stl-tog-sl"></span></span>
+            </label>
+          </div>
+
+          <div class="stl-sec" style="flex:1">
+            <div id="stl-skel-status">No skeleton loaded</div>
+          </div>
+
+        </aside>
+
+        <!-- ── 3D canvas ───────────────────────────────────────── -->
+        <div id="stl-3d-wrap"></div>
+
+      </div>
+    </div>
+
+  </div>
+
+  <div id="divider"></div>
+
+  <!-- Right -->
+  <div id="panel-right">
+    <div id="right-tabs">
+      <button class="tab-btn active" data-tab="tab-video">📹 Video</button>
+      <button class="tab-btn" data-tab="tab-files">📂 Files</button>
+      <button class="tab-btn" data-tab="tab-athletes">👥 Athletes</button>
+    </div>
+    <div id="right-content">
+
+      <!-- Video tab -->
+      <div id="tab-video" class="tab-panel active-tab">
+        <div id="video-chip-bar"></div>
+        <div id="video-wrap">
+          <video id="video-player" preload="metadata"></video>
+          <div id="no-video" class="empty-state"><div style="font-size:36px">🎥</div><div>Select a video above</div></div>
+        </div>
+        <div id="video-controls">
+          <div id="seek-row">
+            <span id="video-time">0:00 / 0:00</span>
+            <input type="range" id="video-seek" min="0" max="10000" value="0" step="1" />
+          </div>
+          <div id="ctrl-row">
+            <button class="btn" id="btn-skip-back" title="−10s">◄◄ 10s</button>
+            <button class="btn" id="btn-play-pause" title="Play/Pause [Space]">▶</button>
+            <button class="btn" id="btn-skip-fwd" title="+10s">10s ►►</button>
+            <div id="ctrl-right">
+              <label style="font-size:12px;color:var(--muted)">Speed:</label>
+              <select id="speed-select">
+                <option value="0.25">0.25×</option>
+                <option value="0.5">0.5×</option>
+                <option value="1" selected>1×</option>
+                <option value="1.5">1.5×</option>
+                <option value="2">2×</option>
+                <option value="3">3×</option>
+              </select>
+              <button class="btn sm" id="btn-pose" disabled title="Run pose processing">🦴 Pose</button>
+              <button class="btn sm" id="btn-fullscreen">⛶</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Files tab -->
+      <div id="tab-files" class="tab-panel">
+        <div id="files-wrap"><div id="files-list"></div></div>
+        <div id="proc-footer">
+          <div style="display:flex;gap:6px;align-items:center;">
+            <button class="btn primary" id="btn-run-all" disabled>🦴 Pose (all)</button>
+            <button class="btn" id="btn-refresh">↺ Refresh</button>
+            <label style="font-size:12px;color:var(--muted);display:flex;align-items:center;gap:4px;margin-left:6px;">Workers:<input type="number" id="workers-input" min="1" max="16" value="2" style="width:46px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;color:var(--fg);padding:2px 4px;font-size:12px;"/></label>
+          </div>
+          <div id="proc-prog-row">
+            <div class="prog-bar"><div class="prog-fill" id="proc-fill"></div></div>
+            <span id="proc-pct">0%</span>
+          </div>
+          <div id="proc-msg"></div>
+        </div>
+      </div>
+
+      <!-- Athletes tab -->
+      <div id="tab-athletes" class="tab-panel">
+        <div id="ath-list"></div>
+        <div id="ath-footer">
+          <button class="btn primary" id="btn-add-ath">+ Add Athlete</button>
+          <div id="ath-edit-row">
+            <input type="text" id="ath-name-in" placeholder="Name…" maxlength="60" />
+            <input type="number" id="ath-weight-in" placeholder="kg" min="30" max="250" step="0.1" />
+            <button class="btn primary sm" id="btn-save-ath">Save</button>
+            <button class="btn sm" id="btn-cancel-ath">✕</button>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<!-- Create project modal -->
+<div id="new-proj-modal" class="modal-ov">
+  <div class="modal-box">
+    <h3>New Project</h3>
+    <input type="text" id="new-proj-name" placeholder="Project name…" maxlength="200" />
+    <div class="btn-row">
+      <button class="btn" id="btn-new-cancel">Cancel</button>
+      <button class="btn primary" id="btn-new-confirm">Create</button>
+    </div>
+  </div>
+</div>
+
+<!-- Confirm modal -->
+<div id="confirm-modal" class="modal-ov">
+  <div class="modal-box">
+    <h3 id="confirm-title">Confirm</h3>
+    <p id="confirm-msg">Are you sure?</p>
+    <div class="btn-row">
+      <button class="btn" id="btn-conf-cancel">Cancel</button>
+      <button class="btn danger" id="btn-conf-ok">Delete</button>
+    </div>
+  </div>
+</div>
+
+
+
+<!-- Split name modal -->
+<div id="split-modal">
+  <div id="split-modal-box">
+    <h3>Name this split</h3>
+    <div id="split-modal-range"></div>
+    <input type="text" id="split-name-in" placeholder="e.g. Upwind leg 1" maxlength="80" />
+    <div class="btn-row">
+      <button class="btn" id="btn-split-cancel">Cancel</button>
+      <button class="btn primary" id="btn-split-save">Save Split</button>
+    </div>
+  </div>
+</div>
+
+<!-- Athlete assign popup -->
+<div id="assign-popup"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+<script type="module" src="/static/app.js"></script>
+</body>
+</html>

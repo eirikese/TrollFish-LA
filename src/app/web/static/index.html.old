@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TrollFish — Session Explorer</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #0e1117; --surface: #161b22; --surface2: #1f2937; --border: #30363d;
+      --accent: #1d8fd8; --accent-h: #45aef5; --green: #2ea043; --red: #e84040;
+      --yellow: #d29922; --orange: #e86030; --text: #e6edf3; --muted: #8b949e;
+      --radius: 6px; --radius-lg: 8px;
+    }
+    html, body { height: 100%; background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 14px; overflow: hidden; }
+
+    /* Topbar */
+    #topbar { display: flex; align-items: center; gap: 8px; flex-shrink: 0; padding: 0 14px; height: 48px; background: var(--surface); border-bottom: 1px solid var(--border); position: relative; }
+    .brand { font-weight: 700; font-size: 15px; color: var(--accent); margin-right: 6px; white-space: nowrap; letter-spacing: .02em; }
+    #topbar select { background: var(--surface2); border: 1px solid var(--border); color: var(--text); border-radius: var(--radius); padding: 5px 10px; font-size: 13px; min-width: 200px; }
+    .spacer { flex: 1; }
+    .btn { display: inline-flex; align-items: center; gap: 5px; padding: 5px 12px; border-radius: var(--radius); border: 1px solid var(--border); background: var(--surface2); color: var(--text); cursor: pointer; font-size: 13px; font-weight: 500; transition: background .12s, border-color .12s; white-space: nowrap; line-height: 1; }
+    .btn:hover { background: var(--surface); border-color: var(--accent); color: var(--accent-h); }
+    .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .btn.primary:hover { background: var(--accent-h); }
+    .btn.danger { background: var(--red); border-color: var(--red); color: #fff; }
+    .btn.danger:hover { background: #ff5555; }
+    .btn.sm { padding: 3px 8px; font-size: 12px; }
+    .btn:disabled { opacity: .4; cursor: not-allowed; pointer-events: none; }
+    .btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+    #job-badge { font-size: 12px; padding: 2px 8px; border-radius: 12px; background: var(--surface2); border: 1px solid var(--border); white-space: nowrap; }
+    #job-badge.running { background: rgba(29,143,216,.15); border-color: var(--accent); color: var(--accent); }
+    #job-badge.completed { background: rgba(46,160,67,.12); border-color: var(--green); color: var(--green); }
+    #job-badge.failed { background: rgba(232,64,64,.12); border-color: var(--red); color: var(--red); }
+    #upload-strip { height: 3px; background: transparent; position: absolute; bottom: 0; left: 0; right: 0; }
+    #upload-fill { height: 100%; width: 0%; background: var(--accent); transition: width .08s; }
+
+    /* Layout: top area + bottom timeline */
+    #main-wrap { display: flex; flex-direction: column; height: calc(100vh - 48px); overflow: hidden; }
+    #layout { display: flex; flex: 1; min-height: 0; overflow: hidden; }
+    #panel-left { display: flex; flex-direction: column; width: 58%; min-width: 280px; flex-shrink: 0; }
+    #map { flex: 1; min-height: 0; position: relative; }
+
+    /* Map controls */
+    #map-controls { background: var(--surface); border-top: 1px solid var(--border); flex-shrink: 0; }
+    #map-ctrl-row { display: flex; align-items: center; gap: 8px; padding: 5px 10px; flex-wrap: wrap; }
+    .map-check { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 4px; cursor: pointer; }
+    .map-check input { accent-color: var(--accent); }
+
+    /* Track panel */
+    #track-panel { border-top: 1px solid var(--border); background: var(--surface); overflow: hidden; transition: max-height .2s; }
+    #track-panel.collapsed { max-height: 26px; }
+    #track-panel-hdr { display: flex; align-items: center; gap: 6px; padding: 4px 10px; font-size: 11px; color: var(--muted); cursor: pointer; user-select: none; font-weight: 600; letter-spacing: .03em; }
+    #track-panel-hdr:hover { color: var(--text); }
+    #track-panel-list { padding: 0 10px 6px; max-height: 100px; overflow-y: auto; }
+    #track-panel-list::-webkit-scrollbar { width: 4px; } #track-panel-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+    .trk-row { display: flex; align-items: center; gap: 6px; padding: 2px 0; font-size: 12px; }
+    .trk-eye { cursor: pointer; opacity: .4; line-height: 1; flex-shrink: 0; width: 16px; height: 16px; }
+    .trk-eye.on { opacity: 1; }
+    .trk-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+    .trk-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+    .trk-badge { font-size: 10px; padding: 1px 5px; border-radius: 3px; font-weight: 700; text-transform: uppercase; flex-shrink: 0; }
+    .trk-badge.vid { background: rgba(29,143,216,.2); color: var(--accent); }
+    .trk-badge.csv { background: rgba(46,160,67,.2); color: var(--green); }
+    .trk-link { font-size: 11px; opacity: .55; cursor: default; flex-shrink: 0; }
+    .trk-day { font-size: 10px; color: var(--muted); flex-shrink: 0; }
+
+    /* Range picker bar */
+    #range-picker-bar { display: none; align-items: center; gap: 6px; padding: 5px 10px; background: var(--surface); border-top: 1px solid var(--border); font-size: 12px; }
+    #range-picker-bar.open { display: flex; }
+    .range-label { color: var(--muted); font-weight: 500; }
+    .range-time-input { width: 65px; background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); padding: 3px 6px; font-size: 12px; font-variant-numeric: tabular-nums; text-align: center; }
+    #range-duration { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+    /* Split label icons on map */
+    .split-label-icon { background: rgba(14,17,23,.9); border: 1px solid rgba(255,255,255,.2); border-radius: 3px; padding: 1px 6px; font-size: 11px; font-weight: 600; white-space: nowrap; cursor: pointer; }
+
+    /* Splits */
+    .split-section { border-top: 1px solid var(--border); margin-top: 5px; padding: 4px 0 2px; }
+    .split-section-hdr { font-size: 10px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; padding: 2px 0 3px; }
+    .split-item { display: flex; align-items: center; gap: 5px; padding: 2px 0; font-size: 12px; }
+    .split-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; color: var(--text); }
+    .split-name:hover { color: var(--accent); }
+    .split-range { font-size: 11px; color: var(--muted); white-space: nowrap; }
+    .split-del { background: none; border: none; color: var(--red); opacity: .4; cursor: pointer; font-size: 12px; padding: 0 2px; flex-shrink: 0; }
+    .split-del:hover { opacity: 1; }
+
+    /* Split modal */
+    #split-modal { position: fixed; inset: 0; z-index: 2000; background: rgba(0,0,0,.55); display: none; align-items: center; justify-content: center; }
+    #split-modal.open { display: flex; }
+    #split-modal-box { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 20px; min-width: 300px; }
+    #split-modal-box h3 { margin-bottom: 8px; font-size: 14px; }
+    #split-modal-range { font-size: 12px; color: var(--muted); margin-bottom: 12px; }
+    #split-name-in { width: 100%; margin-bottom: 12px; padding: 7px 10px; background: var(--surface2); border: 1px solid var(--border); color: var(--text); border-radius: var(--radius); font-size: 14px; }
+
+    /* STL resize handle */
+    #stl-resize-handle { width: 100%; height: 5px; background: var(--border); cursor: ns-resize; flex-shrink: 0; display: none; }
+    #stl-resize-handle:hover, #stl-resize-handle.dragging { background: var(--accent); }
+    #panel-left.stl-open #stl-resize-handle { display: block; }
+
+    /* Divider */
+    #divider { width: 5px; background: var(--border); cursor: col-resize; flex-shrink: 0; }
+    #divider:hover, #divider.dragging { background: var(--accent); }
+
+    /* Right */
+    #panel-right { flex: 1; display: flex; flex-direction: column; min-width: 260px; overflow: hidden; }
+    #right-tabs { display: flex; border-bottom: 1px solid var(--border); background: var(--surface); flex-shrink: 0; }
+    .tab-btn { padding: 9px 14px; border: none; background: none; color: var(--muted); cursor: pointer; font-size: 13px; font-weight: 600; border-bottom: 2px solid transparent; transition: color .12s, border-color .12s; letter-spacing: .02em; }
+    .tab-btn:hover { color: var(--text); }
+    .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+    #right-content { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
+    .tab-panel { display: none; flex-direction: column; height: 100%; overflow: hidden; }
+    .tab-panel.active-tab { display: flex; }
+
+    /* Dual Video viewer */
+    #video-grid { flex: 1; display: flex; flex-direction: column; gap: 4px; padding: 4px; background: #000; min-height: 0; overflow: hidden; }
+    .video-pane { flex: 1; display: flex; flex-direction: column; border: 3px solid transparent; border-radius: 6px; overflow: hidden; min-width: 0; background: #000; position: relative; }
+    .video-pane .pane-label { position: absolute; top: 6px; left: 8px; font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 4px; z-index: 5; background: rgba(0,0,0,.7); pointer-events: none; }
+    .video-pane video { width: 100%; height: 100%; object-fit: contain; display: block; }
+    .video-pane .empty-state { display: flex; flex: 1; align-items: center; justify-content: center; color: var(--muted); font-size: 12px; text-align: center; padding: 8px; }
+    /* Hide native controls on all video elements */
+    .video-pane video::-webkit-media-controls { display: none !important; }
+
+    .empty-state { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: var(--muted); font-size: 13px; text-align: center; padding: 16px; }
+
+    /* Files */
+    #files-wrap { flex: 1; overflow-y: auto; padding: 6px; }
+    #files-wrap::-webkit-scrollbar { width: 5px; }
+    #files-wrap::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+    .file-item { display: flex; align-items: center; gap: 7px; padding: 8px 10px; border-radius: var(--radius-lg); background: var(--surface2); border: 1px solid transparent; margin-bottom: 4px; transition: border-color .12s, background .12s; }
+    .file-item:hover { border-color: var(--border); background: #232c3a; }
+    .day-group-hdr { padding: 6px 9px 4px; font-size: 11px; font-weight: 600; color: var(--muted); letter-spacing: .05em; text-transform: uppercase; }
+    .f-kind { font-size: 10px; padding: 2px 6px; border-radius: 3px; font-weight: 700; text-transform: uppercase; flex-shrink: 0; letter-spacing: .03em; }
+    .f-kind.video { background: rgba(29,143,216,.15); color: var(--accent); }
+    .f-kind.csv { background: rgba(46,160,67,.15); color: var(--green); }
+    .f-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; cursor: pointer; }
+    .f-name:hover { color: var(--accent); }
+    .f-size { font-size: 11px; color: var(--muted); flex-shrink: 0; }
+    .f-cv { font-size: 11px; flex-shrink: 0; padding: 1px 6px; border-radius: 3px; }
+    .f-cv.ok { color: var(--green); background: rgba(46,160,67,.1); }
+    .f-cv.running { color: var(--yellow); background: rgba(210,153,34,.1); }
+    .f-cv.failed { color: var(--red); background: rgba(232,64,64,.1); }
+    .f-athlete-tag { font-size: 11px; color: var(--muted); background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 1px 8px; flex-shrink: 0; max-width: 100px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; transition: border-color .12s; }
+    .f-athlete-tag.clickable { cursor: pointer; }
+    .f-athlete-tag.clickable:hover { border-color: var(--accent); color: var(--accent); }
+    .f-athlete-tag:not(.clickable) { cursor: default; opacity: .7; }
+    .f-del-btn { color: var(--red); background: none; border: none; cursor: pointer; font-size: 13px; padding: 2px 4px; border-radius: 3px; opacity: .4; flex-shrink: 0; transition: opacity .12s; }
+    .f-del-btn:hover { opacity: 1; background: rgba(232,64,64,.12); }
+    #proc-footer { padding: 8px 10px; background: var(--surface); border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 5px; flex-shrink: 0; }
+    #proc-prog-row { display: flex; align-items: center; gap: 8px; display: none; }
+    .prog-bar { flex: 1; height: 5px; background: var(--border); border-radius: 3px; overflow: hidden; }
+    .prog-fill { height: 100%; background: var(--accent); border-radius: 3px; width: 0%; transition: width .3s; }
+    #proc-pct { font-size: 11px; color: var(--muted); min-width: 32px; text-align: right; font-variant-numeric: tabular-nums; }
+    #proc-msg { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+    /* Athletes */
+    #ath-list { flex: 1; overflow-y: auto; padding: 6px; }
+    .ath-item { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: var(--radius-lg); background: var(--surface2); margin-bottom: 4px; border: 1px solid var(--border); transition: border-color .12s; }
+    .ath-item:hover { border-color: var(--accent); }
+    .ath-color { width: 14px; height: 14px; border-radius: 50%; flex-shrink: 0; border: 2px solid rgba(255,255,255,.1); }
+    .ath-name { flex: 1; font-size: 13px; font-weight: 500; cursor: pointer; }
+    .ath-name:hover { color: var(--accent); }
+    .ath-weight { font-size: 12px; color: var(--muted); flex-shrink: 0; min-width: 44px; text-align: right; font-variant-numeric: tabular-nums; }
+    .ath-del { color: var(--muted); background: none; border: none; cursor: pointer; font-size: 13px; opacity: .4; flex-shrink: 0; transition: opacity .12s, color .12s; }
+    .ath-del:hover { opacity: 1; color: var(--red); }
+    #ath-footer { padding: 8px 10px; background: var(--surface); border-top: 1px solid var(--border); flex-shrink: 0; display: flex; flex-direction: column; gap: 6px; }
+    #ath-edit-row { display: none; flex-direction: row; gap: 5px; align-items: center; }
+    #ath-edit-row.open { display: flex; }
+    #ath-name-in { flex: 1; background: var(--surface2); border: 1px solid var(--border); color: var(--text); border-radius: var(--radius); padding: 6px 10px; font-size: 13px; }
+    #ath-weight-in { width: 75px; background: var(--surface2); border: 1px solid var(--border); color: var(--text); border-radius: var(--radius); padding: 6px 10px; font-size: 13px; }
+
+    /* Analysis tab */
+    #analysis-wrap { flex: 1; overflow-y: auto; padding: 0; }
+    #analysis-wrap::-webkit-scrollbar { width: 5px; } #analysis-wrap::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+    .analysis-header { padding: 14px 14px 8px; border-bottom: 1px solid var(--border); }
+    .analysis-header h3 { font-size: 15px; font-weight: 600; margin: 0 0 4px; }
+    .analysis-subtitle { font-size: 12px; color: var(--muted); margin: 0; }
+    #analysis-segments { padding: 0; }
+    .analysis-section-hdr { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); padding: 12px 14px 6px; }
+    .an-split { display: flex; align-items: center; gap: 8px; padding: 8px 14px; border-bottom: 1px solid var(--border); transition: background .1s; cursor: pointer; }
+    .an-split:hover { background: rgba(29,143,216,.05); }
+    .an-split.selected { background: rgba(29,143,216,.1); border-left: 3px solid var(--accent); }
+    .an-split-check { width: 16px; height: 16px; accent-color: var(--accent); flex-shrink: 0; }
+    .an-split-color { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+    .an-split-info { flex: 1; min-width: 0; }
+    .an-split-name { font-size: 13px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .an-split-meta { font-size: 11px; color: var(--muted); display: flex; gap: 10px; margin-top: 2px; }
+    .an-split-meta span { white-space: nowrap; }
+    .an-split-jump { background: none; border: none; color: var(--accent); cursor: pointer; font-size: 11px; padding: 2px 6px; border-radius: 3px; flex-shrink: 0; opacity: .6; transition: opacity .12s; }
+    .an-split-jump:hover { opacity: 1; background: rgba(29,143,216,.1); }
+    #analysis-compare { padding: 0 14px 10px; }
+    .an-compare-row { display: flex; justify-content: space-between; align-items: center; padding: 5px 0; font-size: 12px; color: var(--text); border-bottom: 1px solid rgba(48,54,61,.4); }
+    .an-compare-row .label { color: var(--muted); }
+    .an-compare-row .val { font-weight: 600; font-variant-numeric: tabular-nums; }
+    #analysis-footer { padding: 10px 14px; background: var(--surface); border-top: 1px solid var(--border); display: flex; gap: 8px; justify-content: flex-end; flex-shrink: 0; }
+
+    /* STL 3D (unchanged) */
+    #stl-inline { display: none; flex-direction: column; flex: 0 0 48%; min-height: 0; overflow: hidden; border-top: 1px solid #202838; }
+    #stl-inline.open { display: flex; }
+    #panel-left.stl-open #map { flex: 1 1 52%; min-height: 120px; }
+    #stl-header { display: flex; align-items: center; padding: 0 12px; height: 34px; background: linear-gradient(90deg,#11151c,#141b26); border-bottom: 1px solid #202838; gap: 10px; flex-shrink: 0; }
+    #stl-header h2 { font-size: 12px; font-weight: 600; flex: 1; margin: 0; color: #9aa7b2; letter-spacing: .04em; }
+    #stl-layout { flex: 1; display: grid; grid-template-columns: 220px 1fr; grid-template-rows: 1fr; min-height: 0; }
+    #stl-panel { background: #171a21; border-right: 1px solid #202838; display: flex; flex-direction: column; overflow-y: auto; min-height: 0; }
+    .stl-sec { padding: 10px 12px; border-bottom: 1px solid #202838; display: flex; flex-direction: column; gap: 6px; }
+    .stl-sec h3 { margin: 0; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .08em; color: #9aa7b2; }
+    #stl-3d-wrap { position: relative; overflow: hidden; min-height: 0; }
+    #stl-3d-wrap canvas { display: block; width: 100%; height: 100%; }
+    .stl-cam-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
+    .stl-cam-btn { background: #1e2430; border: 1px solid #283249; color: #e8edf2; padding: 5px 4px; border-radius: 6px; font-size: 11px; cursor: pointer; text-align: center; transition: border-color .12s; }
+    .stl-cam-btn:hover { border-color: #5cc8ff; }
+    .stl-metric { display: flex; justify-content: space-between; align-items: center; font-size: 12px; color: #9aa7b2; }
+    .stl-metric strong { color: #e8edf2; font-weight: 600; font-variant-numeric: tabular-nums; }
+    .stl-dial-wrap { display: flex; flex-direction: column; align-items: center; gap: 2px; }
+    .stl-dial-val { font-size: 18px; font-weight: 700; color: #5cc8ff; font-variant-numeric: tabular-nums; }
+    .stl-tog-row { display: flex; align-items: center; justify-content: space-between; padding: 3px 0; font-size: 12px; color: #e8edf2; cursor: pointer; }
+    .stl-tog { position: relative; width: 34px; height: 18px; flex-shrink: 0; }
+    .stl-tog input { opacity: 0; width: 0; height: 0; position: absolute; }
+    .stl-tog-sl { position: absolute; cursor: pointer; inset: 0; background: #283249; border-radius: 18px; transition: .25s; }
+    .stl-tog-sl:before { position: absolute; content: ''; height: 12px; width: 12px; left: 3px; bottom: 3px; background: #9aa7b2; border-radius: 50%; transition: .25s; }
+    .stl-tog input:checked + .stl-tog-sl { background: #5cc8ff; }
+    .stl-tog input:checked + .stl-tog-sl:before { transform: translateX(16px); background: #fff; }
+    #stl-skel-status { font-size: 12px; color: #9aa7b2; text-align: center; padding: 6px; }
+    #stl-skel-status.ok { color: #7affc8; }
+
+    /* ── Shared Timeline (bottom bar) ──────────────────────── */
+    #timeline-bar { flex-shrink: 0; background: var(--surface); border-top: 1px solid var(--border); padding: 0; display: flex; flex-direction: column; user-select: none; }
+    #timeline-controls { display: flex; align-items: center; gap: 8px; padding: 4px 12px; }
+    #btn-tl-play { font-size: 14px; padding: 4px 14px; min-width: 44px; text-align: center; }
+    #tl-time { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; min-width: 160px; }
+    #tl-speed-select { background: var(--surface2); border: 1px solid var(--border); color: var(--text); border-radius: var(--radius); padding: 3px 6px; font-size: 12px; }
+    #sog-canvas-wrap { position: relative; height: 64px; cursor: pointer; margin: 0 12px 6px; }
+    #sog-canvas { width: 100%; height: 100%; display: block; border-radius: 4px; background: var(--surface2); }
+    #sog-playhead { position: absolute; top: 0; bottom: 0; width: 2px; background: #fff; pointer-events: none; z-index: 2; left: 0; }
+
+    /* Modals */
+    .modal-ov { display: none; position: fixed; inset: 0; z-index: 900; background: rgba(0,0,0,.6); align-items: center; justify-content: center; }
+    .modal-ov.open { display: flex; }
+    .modal-box { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 22px; min-width: 310px; max-width: 420px; }
+    .modal-box h3 { margin-bottom: 10px; font-size: 15px; }
+    .modal-box p { font-size: 13px; color: var(--muted); margin-bottom: 16px; line-height: 1.5; }
+    .modal-box input { width: 100%; margin-bottom: 14px; padding: 7px 10px; background: var(--surface2); border: 1px solid var(--border); color: var(--text); border-radius: var(--radius); font-size: 14px; }
+    .modal-box .btn-row { display: flex; gap: 8px; justify-content: flex-end; }
+    #assign-popup { position: fixed; z-index: 500; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 6px; min-width: 180px; box-shadow: 0 4px 20px rgba(0,0,0,.5); display: none; }
+    .assign-opt { padding: 6px 10px; border-radius: 4px; cursor: pointer; font-size: 13px; transition: background .1s; }
+    .assign-opt:hover { background: var(--surface2); }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+    .leaflet-container { background: #111820; }
+    .pos-dot { width: 10px; height: 10px; border-radius: 50%; border: 2px solid #fff; box-shadow: 0 0 5px rgba(255,50,50,.8); }
+    .icon-svg { width: 14px; height: 14px; vertical-align: -2px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+
+  </style>
+</head>
+<body>
+
+<!-- SVG icons -->
+<svg style="display:none" xmlns="http://www.w3.org/2000/svg">
+  <symbol id="ico-upload" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></symbol>
+  <symbol id="ico-play" viewBox="0 0 24 24"><polygon points="5 3 19 12 5 21 5 3"/></symbol>
+  <symbol id="ico-pause" viewBox="0 0 24 24"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></symbol>
+  <symbol id="ico-trash" viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></symbol>
+  <symbol id="ico-plus" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></symbol>
+  <symbol id="ico-process" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></symbol>
+  <symbol id="ico-refresh" viewBox="0 0 24 24"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></symbol>
+  <symbol id="ico-expand" viewBox="0 0 24 24"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></symbol>
+  <symbol id="ico-target" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></symbol>
+  <symbol id="ico-tag" viewBox="0 0 24 24"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></symbol>
+  <symbol id="ico-x" viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></symbol>
+  <symbol id="ico-skip-back" viewBox="0 0 24 24"><polygon points="19 20 9 12 19 4 19 20"/><line x1="5" y1="19" x2="5" y2="5"/></symbol>
+  <symbol id="ico-skip-fwd" viewBox="0 0 24 24"><polygon points="5 4 15 12 5 20 5 4"/><line x1="19" y1="5" x2="19" y2="19"/></symbol>
+  <symbol id="ico-cube" viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></symbol>
+  <symbol id="ico-activity" viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></symbol>
+  <symbol id="ico-scissors" viewBox="0 0 24 24"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><line x1="20" y1="4" x2="8.12" y2="15.88"/><line x1="14.47" y1="14.48" x2="20" y2="20"/><line x1="8.12" y1="8.12" x2="12" y2="12"/></symbol>
+  <symbol id="ico-eye" viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></symbol>
+  <symbol id="ico-link" viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></symbol>
+  <symbol id="ico-download" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></symbol>
+  <symbol id="ico-bar-chart" viewBox="0 0 24 24"><line x1="12" y1="20" x2="12" y2="10"/><line x1="18" y1="20" x2="18" y2="4"/><line x1="6" y1="20" x2="6" y2="16"/></symbol>
+</svg>
+
+<!-- Topbar -->
+<div id="topbar">
+  <span class="brand">TrollFish</span>
+  <select id="project-select"><option value="">Select project</option></select>
+  <button class="btn" id="btn-new-proj"><svg class="icon-svg"><use href="#ico-plus"/></svg> New</button>
+  <button class="btn danger sm" id="btn-del-proj" disabled title="Delete project"><svg class="icon-svg" style="width:12px;height:12px"><use href="#ico-trash"/></svg></button>
+  <button class="btn" id="btn-upload" disabled><svg class="icon-svg"><use href="#ico-upload"/></svg> Upload</button>
+  <button class="btn" id="btn-process" disabled><svg class="icon-svg"><use href="#ico-process"/></svg> Process</button>
+  <input type="file" id="file-input" multiple accept=".mp4,.mov,.csv" style="display:none" />
+  <span class="spacer"></span>
+  <span id="job-badge" style="display:none"></span>
+  <button class="btn" id="btn-stl"><svg class="icon-svg"><use href="#ico-cube"/></svg> Hull 3D</button>
+  <div id="upload-strip"><div id="upload-fill"></div></div>
+</div>
+
+<div id="main-wrap">
+  <div id="layout">
+    <div id="panel-left">
+      <div id="map"></div>
+      <div id="map-controls">
+        <div id="map-ctrl-row">
+          <button class="btn sm" id="btn-range-mode" title="Select a time range on the track"><svg class="icon-svg" style="width:12px;height:12px"><use href="#ico-target"/></svg> Range</button>
+          <span id="range-info" style="display:none;font-size:11px;color:var(--muted);margin-left:4px;"></span>
+          <button class="btn sm" id="btn-clear-range" style="display:none;"><svg class="icon-svg" style="width:10px;height:10px"><use href="#ico-x"/></svg></button>
+          <button class="btn sm primary" id="btn-proc-range" style="display:none;">Process Range</button>
+          <button class="btn sm" id="btn-label-split" style="display:none;"><svg class="icon-svg" style="width:12px;height:12px"><use href="#ico-tag"/></svg> Label</button>
+        </div>
+        <div id="range-picker-bar">
+          <span class="range-label">Start:</span>
+          <input id="range-input-start" class="range-time-input" type="text" placeholder="0:00" />
+          <span class="range-label">End:</span>
+          <input id="range-input-end" class="range-time-input" type="text" placeholder="0:00" />
+          <button class="btn sm" id="btn-apply-range-inputs">Apply</button>
+          <span style="flex:1"></span>
+          <span id="range-duration"></span>
+        </div>
+
+        <div id="track-panel" class="collapsed">
+          <div id="track-panel-hdr">Tracks</div>
+          <div id="track-panel-list"></div>
+        </div>
+      </div>
+      <div id="stl-resize-handle"></div>
+      <div id="stl-inline">
+        <div id="stl-header">
+          <h2>Hull + Skeleton 3D</h2>
+          <button class="btn sm" id="btn-stl-close"><svg class="icon-svg" style="width:10px;height:10px"><use href="#ico-x"/></svg> Close</button>
+        </div>
+        <div id="stl-layout">
+          <aside id="stl-panel">
+            <div class="stl-sec"><h3>Trunk Angle</h3>
+              <div class="stl-dial-wrap"><svg viewBox="0 0 120 80" width="110" height="75"><path d="M 15 70 A 50 50 0 0 1 105 70" fill="none" stroke="#283249" stroke-width="8" stroke-linecap="round"/><line id="stl-dial-needle" x1="60" y1="70" x2="60" y2="25" stroke="#5cc8ff" stroke-width="3" stroke-linecap="round"/><circle cx="60" cy="70" r="5" fill="#e8edf2"/><text x="10" y="78" fill="#9aa7b2" font-size="10">0</text><text x="97" y="78" fill="#9aa7b2" font-size="10">90</text></svg><div class="stl-dial-val" id="stl-dial-val">--</div></div>
+            </div>
+            <div class="stl-sec"><h3>Live Metrics</h3><div class="stl-metric"><span>Trunk</span><strong id="stl-m-trunk">--</strong></div><div class="stl-metric"><span>COM X</span><strong id="stl-m-hipx">--</strong></div><div class="stl-metric"><span>COM Y</span><strong id="stl-m-hipy">--</strong></div><div class="stl-metric"><span>COM Z</span><strong id="stl-m-hipz">--</strong></div></div>
+            <div class="stl-sec"><h3>Camera Presets</h3><div class="stl-cam-grid"><button class="stl-cam-btn" onclick="window.stlSetCamera('default')">Default</button><button class="stl-cam-btn" onclick="window.stlSetCamera('side')">Side</button><button class="stl-cam-btn" onclick="window.stlSetCamera('top')">Top</button><button class="stl-cam-btn" onclick="window.stlSetCamera('front')">Bow</button><button class="stl-cam-btn" onclick="window.stlSetCamera('rear')">Stern</button><button class="stl-cam-btn" onclick="window.stlSetCamera('athlete')">Athlete</button></div></div>
+            <div class="stl-sec"><h3>Visibility</h3><label class="stl-tog-row"><span>Hull</span><span class="stl-tog"><input type="checkbox" id="stl-tog-hull" checked><span class="stl-tog-sl"></span></span></label><label class="stl-tog-row"><span>Skeleton</span><span class="stl-tog"><input type="checkbox" id="stl-tog-skel" checked><span class="stl-tog-sl"></span></span></label><label class="stl-tog-row"><span>Joints</span><span class="stl-tog"><input type="checkbox" id="stl-tog-joints" checked><span class="stl-tog-sl"></span></span></label><label class="stl-tog-row"><span>COM</span><span class="stl-tog"><input type="checkbox" id="stl-tog-com" checked><span class="stl-tog-sl"></span></span></label><label class="stl-tog-row"><span>Grid</span><span class="stl-tog"><input type="checkbox" id="stl-tog-grid" checked><span class="stl-tog-sl"></span></span></label></div>
+            <div class="stl-sec" style="flex:1"><div id="stl-skel-status">No skeleton loaded</div></div>
+          </aside>
+          <div id="stl-3d-wrap"></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="divider"></div>
+
+    <div id="panel-right">
+      <div id="right-tabs">
+        <button class="tab-btn active" data-tab="tab-video">Video</button>
+        <button class="tab-btn" data-tab="tab-files">Files</button>
+        <button class="tab-btn" data-tab="tab-athletes">Athletes</button>
+        <button class="tab-btn" data-tab="tab-analysis">Analysis</button>
+      </div>
+      <div id="right-content">
+        <div id="tab-video" class="tab-panel active-tab">
+          <div id="video-grid"></div>
+          <div id="no-video" class="empty-state" style="padding:20px;"><svg class="icon-svg" style="width:40px;height:40px;color:var(--muted)"><use href="#ico-play"/></svg><div>Upload videos and assign athletes to begin</div></div>
+        </div>
+        <div id="tab-files" class="tab-panel">
+          <div id="files-wrap"><div id="files-list"></div></div>
+          <div id="proc-footer">
+            <div style="display:flex;gap:6px;align-items:center;">
+              <button class="btn primary" id="btn-run-all" disabled><svg class="icon-svg"><use href="#ico-activity"/></svg> Pose (all)</button>
+              <button class="btn" id="btn-refresh"><svg class="icon-svg"><use href="#ico-refresh"/></svg> Refresh</button>
+              <label style="font-size:12px;color:var(--muted);display:flex;align-items:center;gap:4px;margin-left:6px;">Workers:<input type="number" id="workers-input" min="1" max="16" value="2" style="width:46px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:2px 4px;font-size:12px;" /></label>
+            </div>
+            <div id="proc-prog-row"><div class="prog-bar"><div class="prog-fill" id="proc-fill"></div></div><span id="proc-pct">0%</span></div>
+            <div id="proc-msg"></div>
+          </div>
+        </div>
+        <div id="tab-athletes" class="tab-panel">
+          <div id="ath-list"></div>
+          <div id="ath-footer">
+            <button class="btn primary" id="btn-add-ath"><svg class="icon-svg"><use href="#ico-plus"/></svg> Add Athlete</button>
+            <div id="ath-edit-row"><input type="text" id="ath-name-in" placeholder="Name" maxlength="60" /><input type="number" id="ath-weight-in" placeholder="kg" min="30" max="250" step="0.1" /><button class="btn primary sm" id="btn-save-ath">Save</button><button class="btn sm" id="btn-cancel-ath"><svg class="icon-svg" style="width:10px;height:10px"><use href="#ico-x"/></svg></button></div>
+          </div>
+        </div>
+        <div id="tab-analysis" class="tab-panel">
+          <div id="analysis-wrap">
+            <div class="analysis-header"><h3>Segment Analysis</h3><p class="analysis-subtitle">Select labelled splits to compare and prepare reports</p></div>
+            <div id="analysis-segments">
+              <div id="analysis-empty" class="empty-state" style="padding:28px 16px;"><svg class="icon-svg" style="width:32px;height:32px;color:var(--muted)"><use href="#ico-scissors"/></svg><div>No labelled splits yet</div><div style="font-size:12px;color:var(--muted);max-width:260px;line-height:1.5;">Use the <strong>Range</strong> tool on the map to select a time window, then click <strong>Label</strong> to name the segment.</div></div>
+              <div id="analysis-list"></div>
+            </div>
+            <div id="analysis-compare" style="display:none;"><div class="analysis-section-hdr">Comparison</div><div id="analysis-compare-body"></div></div>
+          </div>
+          <div id="analysis-footer"><button class="btn" id="btn-export-csv" disabled><svg class="icon-svg"><use href="#ico-process"/></svg> Export CSV</button><button class="btn primary" id="btn-gen-report" disabled><svg class="icon-svg"><use href="#ico-activity"/></svg> Generate Report</button></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Shared timeline at bottom -->
+  <div id="timeline-bar">
+    <div id="timeline-controls">
+      <button class="btn" id="btn-tl-skip-back" title="Back 10s"><svg class="icon-svg"><use href="#ico-skip-back"/></svg></button>
+      <button class="btn" id="btn-tl-play" title="Play / Pause"><svg class="icon-svg" id="tl-play-icon"><use href="#ico-play"/></svg></button>
+      <button class="btn" id="btn-tl-skip-fwd" title="Forward 10s"><svg class="icon-svg"><use href="#ico-skip-fwd"/></svg></button>
+      <span id="tl-time">--:-- / --:--</span>
+      <span class="spacer"></span>
+      <label style="font-size:12px;color:var(--muted)">Speed:</label>
+      <select id="tl-speed-select">
+        <option value="0.25">0.25x</option><option value="0.5">0.5x</option>
+        <option value="1" selected>1x</option><option value="1.5">1.5x</option>
+        <option value="2">2x</option><option value="3">3x</option>
+      </select>
+    </div>
+    <div id="sog-canvas-wrap">
+      <canvas id="sog-canvas"></canvas>
+      <div id="sog-playhead"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Modals -->
+<div id="new-proj-modal" class="modal-ov"><div class="modal-box"><h3>New Project</h3><input type="text" id="new-proj-name" placeholder="Project name" maxlength="200" /><div class="btn-row"><button class="btn" id="btn-new-cancel">Cancel</button><button class="btn primary" id="btn-new-confirm">Create</button></div></div></div>
+<div id="confirm-modal" class="modal-ov"><div class="modal-box"><h3 id="confirm-title">Confirm</h3><p id="confirm-msg">Are you sure?</p><div class="btn-row"><button class="btn" id="btn-conf-cancel">Cancel</button><button class="btn danger" id="btn-conf-ok">Delete</button></div></div></div>
+<div id="split-modal"><div id="split-modal-box"><h3>Name this split</h3><div id="split-modal-range"></div><input type="text" id="split-name-in" placeholder="e.g. Upwind leg 1" maxlength="80" /><div class="btn-row"><button class="btn" id="btn-split-cancel">Cancel</button><button class="btn primary" id="btn-split-save">Save Split</button></div></div></div>
+<div id="assign-popup"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+<script type="module" src="/static/app.js?v=20260302c"></script>
+</body>
+</html>

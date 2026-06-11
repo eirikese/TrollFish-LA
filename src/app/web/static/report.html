@@ -1,0 +1,726 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TrollFish – Segment Report</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3.0.1/dist/chartjs-plugin-annotation.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script type="importmap">
+{ "imports": {
+    "three": "./vendor/three.module.js",
+    "three/addons/": "./vendor/"
+}}
+</script>
+<style>
+  :root {
+    --bg: #0b0f14; --surface: #131920; --card: #19202a;
+    --border: #1e2430; --text: #d6dde6; --muted: #6b7a8d;
+    --accent: #5cc8ff; --gold: #ffd700;
+    --port-color: #ff6b9d; --stbd-color: #5cc8ff;
+  }
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Inter', system-ui, sans-serif; background: var(--bg); color: var(--text); padding: 20px; }
+  h1 { font-size: 1.5rem; margin-bottom: 2px; color: var(--accent); }
+  h2 { font-size: 1.15rem; margin: 22px 0 8px; border-bottom: 1px solid var(--border); padding-bottom: 4px; }
+  .subtitle { color: var(--muted); margin-bottom: 14px; font-size: 0.82rem; }
+  .loading { text-align: center; padding: 60px; font-size: 1.1rem; color: var(--muted); }
+  .error { color: #ff6b6b; padding: 30px; text-align: center; }
+
+  /* Export toolbar */
+  .export-bar { display: flex; gap: 8px; margin-bottom: 14px; }
+  .export-bar button {
+    background: var(--surface); color: var(--accent); border: 1px solid var(--border);
+    border-radius: 6px; padding: 6px 14px; font-size: 0.78rem; cursor: pointer;
+    transition: background .15s;
+  }
+  .export-bar button:hover { background: var(--card); }
+
+  /* Stats table */
+  .stats-table { width: 100%; border-collapse: collapse; margin: 8px 0 16px; font-size: 0.78rem; }
+  .stats-table th, .stats-table td { padding: 4px 8px; border: 1px solid var(--border); text-align: center; }
+  .stats-table th { background: var(--surface); color: var(--muted); font-weight: 600; white-space: nowrap; }
+  .stats-table td { background: var(--card); }
+  .stats-table .row-label { text-align: left; font-weight: 600; color: var(--muted); background: var(--surface); min-width: 56px; }
+  .stats-table .gold { color: var(--gold); font-weight: 700; }
+  .stats-table .metric-header { text-align: left; background: var(--bg); color: var(--accent); font-size: 0.72rem; }
+
+  /* Comparison grid: row label + N columns */
+  .cmp-section { margin-bottom: 10px; }
+  .cmp-label { font-size: 0.82rem; color: var(--muted); font-weight: 600; margin: 12px 0 4px; padding-left: 2px; }
+  .cmp-grid {
+    display: grid;
+    gap: 8px;
+    /* columns set dynamically via JS */
+  }
+  .cmp-cell {
+    background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+    padding: 8px; min-width: 0; overflow: hidden;
+  }
+  .cmp-cell-header {
+    font-size: 0.72rem; color: var(--muted); margin-bottom: 4px; white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis;
+  }
+  .chart-wrap { position: relative; height: 150px; }
+  .chart-wrap canvas { width: 100% !important; }
+
+  /* Video */
+  .cmp-cell video { width: 100%; border-radius: 6px; background: #000; max-height: 180px; }
+
+  /* Side switch pills */
+  .side-pills { display: flex; gap: 6px; flex-wrap: wrap; font-size: 0.7rem; }
+  .side-pill { background: var(--surface); border-radius: 4px; padding: 3px 8px; border: 1px solid var(--border); }
+  .side-pill .lbl { color: var(--muted); font-size: 0.62rem; text-transform: uppercase; display: block; }
+  .side-pill.port .val { color: var(--port-color); font-weight: 600; }
+  .side-pill.stbd .val { color: var(--stbd-color); font-weight: 600; }
+  .side-pill .val { font-weight: 600; }
+
+  /* Heatmap */
+  .heatmap-canvas { border-radius: 4px; border: 1px solid var(--border); width: 100%; }
+  .heatmap-legend { display: flex; align-items: center; gap: 4px; margin-top: 2px; font-size: 0.62rem; color: var(--muted); }
+  .heatmap-legend .gradient { width: 60px; height: 8px; border-radius: 2px;
+    background: linear-gradient(to right, #0000ff, #00ffff, #00ff00, #ffff00, #ff0000); }
+
+  /* Map */
+  .map-container { height: 160px; border-radius: 6px; border: 1px solid var(--border); overflow: hidden; }
+
+  /* Print styles */
+  @media print {
+    body { background: #fff; color: #111; padding: 10px; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    .export-bar { display: none !important; }
+    .cmp-cell { break-inside: avoid; border-color: #ccc; }
+    .stats-table th, .stats-table td { border-color: #ccc; }
+    .stats-table td { background: #f8f8f8; }
+    .stats-table th, .stats-table .row-label { background: #eee; color: #333; }
+    .stats-table .metric-header { background: #ddd; color: #0077bb; }
+    h1, h2, .cmp-label { color: #0077bb; }
+    .side-pill { background: #f0f0f0; border-color: #ccc; }
+  }
+</style>
+</head>
+<body>
+<div id="root"><div class="loading">Loading report…</div></div>
+
+<script type="module">
+import * as THREE from './vendor/three.module.js';
+import { STLLoader } from './vendor/STLLoader.js';
+
+const params = new URLSearchParams(location.search);
+const PROJECT = params.get('project');
+const SPLITS  = (params.get('splits') || '').split(',').filter(Boolean);
+let REPORT = null;
+
+const segmentCharts = {};  // segId -> [{chart}]
+const segmentVideos = {};  // segId -> <video>
+
+// ── Load ───────────────────────────────────────────────────────────────
+async function loadReport() {
+  const root = document.getElementById('root');
+  if (!PROJECT || !SPLITS.length) {
+    root.innerHTML = '<div class="error">Missing project or split IDs in URL.</div>';
+    return;
+  }
+  try {
+    const res = await fetch(`/api/projects/${PROJECT}/report`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ split_ids: SPLITS }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    REPORT = await res.json();
+    renderReport(REPORT);
+  } catch (err) {
+    root.innerHTML = `<div class="error">Failed to load report: ${err.message}</div>`;
+  }
+}
+
+// ── Render ─────────────────────────────────────────────────────────────
+function renderReport(data) {
+  const root = document.getElementById('root');
+  root.innerHTML = '';
+
+  // Title
+  const title = document.createElement('h1');
+  title.textContent = 'Segment Analysis Report';
+  root.appendChild(title);
+
+  const sub = document.createElement('div');
+  sub.className = 'subtitle';
+  sub.textContent = `${data.segments.length} segments · ${data.athletes.length} athlete(s)`;
+  root.appendChild(sub);
+
+  // Export bar
+  root.appendChild(buildExportBar());
+
+  // Per athlete
+  for (const ath of data.athletes) {
+    const aSegs = data.segments.filter(s => ath.segment_ids.includes(s.split_id));
+    if (!aSegs.length) continue;
+
+    const h2 = document.createElement('h2');
+    h2.textContent = ath.name;
+    root.appendChild(h2);
+
+    // Stats table
+    root.appendChild(buildStatsTable(aSegs, data.golds));
+
+    // Comparison grid — each metric row shows all segments side by side
+    const cols = aSegs.length;
+    const tpl = `repeat(${cols}, 1fr)`;
+
+    // Segment name headers
+    addCmpRow(root, null, aSegs, tpl, (seg, cell) => {
+      cell.style.background = 'var(--surface)';
+      cell.style.textAlign = 'center';
+      cell.style.fontWeight = '600';
+      cell.style.fontSize = '0.82rem';
+      cell.innerHTML = `${seg.name} <span style="color:var(--muted);font-weight:400;font-size:0.7rem">${seg.duration_s.toFixed(1)}s</span>`;
+      const goldCats = Object.entries(data.golds).filter(([, id]) => id === seg.split_id).map(([c]) => c);
+      if (goldCats.length) cell.innerHTML += ` <span style="color:var(--gold);font-size:0.68rem">🏅</span>`;
+    });
+
+    // Video players
+    addCmpRow(root, 'Video', aSegs, tpl, (seg, cell) => {
+      const vid = document.createElement('video');
+      vid.controls = true; vid.preload = 'metadata';
+      vid.src = `/api/projects/${PROJECT}/videos/${seg.file_id}/playback#t=${seg.start_s}`;
+      vid.addEventListener('loadedmetadata', () => { vid.currentTime = seg.start_s; });
+      segmentVideos[seg.split_id] = vid;
+      segmentCharts[seg.split_id] = [];
+      vid.addEventListener('timeupdate', () => updateScrubLines(seg.split_id, vid.currentTime));
+      cell.appendChild(vid);
+    });
+
+    // GPS Map
+    addCmpRow(root, 'GPS Track', aSegs, tpl, (seg, cell) => {
+      if (!seg.gps_path || seg.gps_path.length < 2) { cell.innerHTML = '<span style="color:var(--muted);font-size:0.72rem">No GPS data</span>'; return; }
+      const md = document.createElement('div');
+      md.className = 'map-container';
+      md.id = 'map-' + seg.split_id;
+      cell.appendChild(md);
+      requestAnimationFrame(() => initSegMap(md.id, seg.gps_path));
+    });
+
+    // Side switches
+    addCmpRow(root, 'Side Switches', aSegs, tpl, (seg, cell) => {
+      if (!seg.side_switches) { cell.innerHTML = '–'; return; }
+      cell.appendChild(buildSidePills(seg.side_switches));
+    });
+
+    // Trunk Angle Timeline
+    addCmpRow(root, 'Trunk Angle Timeline', aSegs, tpl, (seg, cell) => {
+      if (!seg.trunk_angle_timeline || seg.trunk_angle_timeline.length < 2) { cell.innerHTML = '–'; return; }
+      const { wrap, canvas } = makeChart(cell);
+      requestAnimationFrame(() => {
+        const c = renderTimeline(canvas, seg.trunk_angle_timeline, 'Trunk (°)', '#ff6b9d');
+        segmentCharts[seg.split_id].push({ chart: c });
+      });
+    });
+
+    // Rudder Angle Timeline
+    addCmpRow(root, 'Rudder Angle Timeline', aSegs, tpl, (seg, cell) => {
+      if (!seg.rudder_timeline || seg.rudder_timeline.length < 2) { cell.innerHTML = '–'; return; }
+      const { wrap, canvas } = makeChart(cell);
+      requestAnimationFrame(() => {
+        const c = renderTimeline(canvas, seg.rudder_timeline, 'Rudder (°)', '#ff9f43');
+        segmentCharts[seg.split_id].push({ chart: c });
+      });
+    });
+
+    // Boom Angle Timeline
+    addCmpRow(root, 'Boom Angle Timeline', aSegs, tpl, (seg, cell) => {
+      if (!seg.boom_timeline || seg.boom_timeline.length < 2) { cell.innerHTML = '–'; return; }
+      const { wrap, canvas } = makeChart(cell);
+      requestAnimationFrame(() => {
+        const c = renderTimeline(canvas, seg.boom_timeline, 'Boom (°)', '#17becf');
+        segmentCharts[seg.split_id].push({ chart: c });
+      });
+    });
+
+    // Moment Timeline
+    addCmpRow(root, 'Moment Generation Timeline', aSegs, tpl, (seg, cell) => {
+      if (!seg.moment_timeline || seg.moment_timeline.length < 2) { cell.innerHTML = '–'; return; }
+      const { wrap, canvas } = makeChart(cell);
+      requestAnimationFrame(() => {
+        const c = renderTimeline(canvas, seg.moment_timeline, 'Moment (Nm)', '#5cc8ff');
+        segmentCharts[seg.split_id].push({ chart: c });
+      });
+    });
+
+    // SOG Timeline
+    addCmpRow(root, 'Speed Over Ground Timeline', aSegs, tpl, (seg, cell) => {
+      if (!seg.sog_timeline || seg.sog_timeline.length < 2) { cell.innerHTML = '–'; return; }
+      const { wrap, canvas } = makeChart(cell);
+      requestAnimationFrame(() => {
+        const c = renderTimeline(canvas, seg.sog_timeline, 'SOG (kn)', '#f5a623');
+        segmentCharts[seg.split_id].push({ chart: c });
+      });
+    });
+
+    // Hiking Histogram
+    addCmpRow(root, 'Hiking Distribution', aSegs, tpl, (seg, cell) => {
+      if (!seg.hiking_histogram || !seg.hiking_histogram.bins.length) { cell.innerHTML = '–'; return; }
+      const { wrap, canvas } = makeChart(cell);
+      requestAnimationFrame(() => renderHikingHist(canvas, seg.hiking_histogram, '#ff6b9d'));
+    });
+
+    // Trunk vs SOG
+    addCmpRow(root, 'Trunk Angle vs SOG', aSegs, tpl, (seg, cell) => {
+      if (!seg.trunk_vs_sog || !seg.trunk_vs_sog.points.length) { cell.innerHTML = '–'; return; }
+      const { wrap, canvas } = makeChart(cell);
+      requestAnimationFrame(() => renderTrunkVsSog(canvas, seg.trunk_vs_sog, '#5cc8ff'));
+    });
+
+    // Cumulative Side Load
+    addCmpRow(root, 'Cumulative Side Load', aSegs, tpl, (seg, cell) => {
+      if (!seg.side_load_cumulative || seg.side_load_cumulative.times.length < 2) { cell.innerHTML = '–'; return; }
+      const { wrap, canvas } = makeChart(cell);
+      requestAnimationFrame(() => renderSideLoad(canvas, seg.side_load_cumulative, '#5cc8ff'));
+    });
+
+    // Keypoint Density Heatmap
+    addCmpRow(root, 'Keypoint Density', aSegs, tpl, (seg, cell) => {
+      if (!seg.keypoint_heatmap) { cell.innerHTML = '–'; return; }
+      const cv = makeHeatmapCanvas(cell, 320, 192);
+      addHeatmapLegend(cell, seg.keypoint_heatmap);
+      requestAnimationFrame(() => renderHeatmapWithBoat(cv, seg.keypoint_heatmap, 3.5));
+    });
+
+    // COM Heatmap (zoomed in)
+    addCmpRow(root, 'Centre of Mass', aSegs, tpl, (seg, cell) => {
+      if (!seg.com_heatmap) { cell.innerHTML = '–'; return; }
+      const cv = makeHeatmapCanvas(cell, 320, 192);
+      addHeatmapLegend(cell, seg.com_heatmap);
+      requestAnimationFrame(() => renderHeatmapWithBoat(cv, seg.com_heatmap, 3.5));
+    });
+  }
+}
+
+// ── Comparison grid helpers ────────────────────────────────────────────
+function addCmpRow(root, label, segs, tpl, cellFn) {
+  const sec = document.createElement('div');
+  sec.className = 'cmp-section';
+  if (label) {
+    const lbl = document.createElement('div');
+    lbl.className = 'cmp-label';
+    lbl.textContent = label;
+    sec.appendChild(lbl);
+  }
+  const grid = document.createElement('div');
+  grid.className = 'cmp-grid';
+  grid.style.gridTemplateColumns = tpl;
+  for (const seg of segs) {
+    const cell = document.createElement('div');
+    cell.className = 'cmp-cell';
+    cellFn(seg, cell);
+    grid.appendChild(cell);
+  }
+  sec.appendChild(grid);
+  root.appendChild(sec);
+}
+
+function makeChart(parent) {
+  const wrap = document.createElement('div');
+  wrap.className = 'chart-wrap';
+  const canvas = document.createElement('canvas');
+  wrap.appendChild(canvas);
+  parent.appendChild(wrap);
+  return { wrap, canvas };
+}
+
+function makeHeatmapCanvas(parent, w, h) {
+  const cv = document.createElement('canvas');
+  cv.className = 'heatmap-canvas';
+  cv.width = w; cv.height = h;
+  parent.appendChild(cv);
+  return cv;
+}
+
+// ── Stats table ────────────────────────────────────────────────────────
+function buildStatsTable(segs, golds) {
+  const table = document.createElement('table');
+  table.className = 'stats-table';
+  const thead = document.createElement('thead');
+  const hr = document.createElement('tr');
+  hr.innerHTML = '<th></th>';
+  for (const s of segs) { const th = document.createElement('th'); th.textContent = s.name; hr.appendChild(th); }
+  thead.appendChild(hr);
+  table.appendChild(thead);
+
+  const tbody = document.createElement('tbody');
+  const metrics = [
+    { key: 'sog', label: 'SOG (kn)', goldAvg: 'avg_sog', goldMax: 'max_sog' },
+    { key: 'moment_roll', label: 'Moment Roll (Nm)', goldAvg: 'avg_moment_roll', goldMax: 'max_moment_roll' },
+    { key: 'trunk_angle', label: 'Trunk Angle (°)', goldAvg: 'avg_trunk_angle', goldMax: 'max_trunk_angle' },
+    { key: 'rudder', label: 'Rudder Angle (°)', goldAvg: null, goldMax: null },
+    { key: 'boom', label: 'Boom Angle (°)', goldAvg: null, goldMax: null },
+  ];
+  for (const m of metrics) {
+    const mhRow = document.createElement('tr');
+    const mhTd = document.createElement('th');
+    mhTd.colSpan = segs.length + 1; mhTd.className = 'metric-header'; mhTd.textContent = m.label;
+    mhRow.appendChild(mhTd); tbody.appendChild(mhRow);
+    for (const rowType of ['avg', 'max']) {
+      const row = document.createElement('tr');
+      row.innerHTML = `<td class="row-label">${rowType === 'avg' ? 'Average' : 'Max'}</td>`;
+      for (const s of segs) {
+        const td = document.createElement('td');
+        const v = s[m.key]?.[rowType];
+        td.textContent = v != null ? v.toFixed(2) : '–';
+        const gk = rowType === 'avg' ? m.goldAvg : m.goldMax;
+        if (gk && golds[gk] === s.split_id) td.classList.add('gold');
+        row.appendChild(td);
+      }
+      tbody.appendChild(row);
+    }
+  }
+  table.appendChild(tbody);
+  return table;
+}
+
+// ── Side switch pills ──────────────────────────────────────────────────
+function buildSidePills(ss) {
+  const d = document.createElement('div');
+  d.className = 'side-pills';
+  const pill = (cls, lbl, val) => `<div class="side-pill ${cls}"><span class="lbl">${lbl}</span><span class="val">${val}</span></div>`;
+  d.innerHTML = [
+    pill('', 'Switches', ss.count),
+    pill('port', 'Port', (ss.port_fraction * 100).toFixed(0) + '%'),
+    pill('stbd', 'Stbd', (ss.starboard_fraction * 100).toFixed(0) + '%'),
+    pill('port', 'Avg Trunk (Port)', ss.port_trunk_avg != null ? ss.port_trunk_avg.toFixed(1) + '°' : '–'),
+    pill('stbd', 'Avg Trunk (Stbd)', ss.stbd_trunk_avg != null ? ss.stbd_trunk_avg.toFixed(1) + '°' : '–'),
+    pill('port', 'Avg Moment (Port)', ss.port_moment_avg != null ? ss.port_moment_avg.toFixed(1) + ' Nm' : '–'),
+    pill('stbd', 'Avg Moment (Stbd)', ss.stbd_moment_avg != null ? ss.stbd_moment_avg.toFixed(1) + ' Nm' : '–'),
+  ].join('');
+  return d;
+}
+
+// ── Export ──────────────────────────────────────────────────────────────
+function buildExportBar() {
+  const bar = document.createElement('div');
+  bar.className = 'export-bar';
+
+  const btnHtml = document.createElement('button');
+  btnHtml.textContent = '⬇ Export HTML';
+  btnHtml.onclick = exportHTML;
+  bar.appendChild(btnHtml);
+
+  const btnPdf = document.createElement('button');
+  btnPdf.textContent = '⬇ Export PDF';
+  btnPdf.onclick = exportPDF;
+  bar.appendChild(btnPdf);
+
+  const btnPrint = document.createElement('button');
+  btnPrint.textContent = '🖨 Print';
+  btnPrint.onclick = () => window.print();
+  bar.appendChild(btnPrint);
+
+  return bar;
+}
+
+function exportHTML() {
+  // Clone the current document, inline canvases as images, strip scripts
+  const clone = document.documentElement.cloneNode(true);
+
+  // Remove scripts & importmap
+  clone.querySelectorAll('script').forEach(s => s.remove());
+
+  // Convert canvases to images
+  const origCanvases = document.querySelectorAll('canvas');
+  const cloneCanvases = clone.querySelectorAll('canvas');
+  cloneCanvases.forEach((cc, i) => {
+    const oc = origCanvases[i];
+    if (!oc) return;
+    try {
+      const img = document.createElement('img');
+      img.src = oc.toDataURL('image/png');
+      img.style.cssText = cc.style.cssText;
+      img.className = cc.className;
+      img.width = cc.width; img.height = cc.height;
+      cc.parentNode.replaceChild(img, cc);
+    } catch (e) { /* cross-origin or empty canvas */ }
+  });
+
+  // Convert videos to placeholders
+  clone.querySelectorAll('video').forEach(v => {
+    const p = document.createElement('div');
+    p.style.cssText = 'background:#222;border-radius:6px;padding:20px;text-align:center;color:#999;font-size:0.8rem';
+    p.textContent = '[ Video — not included in export ]';
+    v.parentNode.replaceChild(p, v);
+  });
+
+  // Remove export bar
+  clone.querySelectorAll('.export-bar').forEach(e => e.remove());
+
+  const html = '<!DOCTYPE html>\n' + clone.outerHTML;
+  const blob = new Blob([html], { type: 'text/html' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'trollfish_report.html';
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+async function exportPDF() {
+  const btn = document.querySelector('.export-bar');
+  if (btn) btn.style.display = 'none';
+
+  // Hide videos temporarily (html2canvas can't handle them well)
+  const videos = document.querySelectorAll('video');
+  const backups = [];
+  videos.forEach(v => {
+    const p = document.createElement('div');
+    p.style.cssText = 'background:#222;border-radius:6px;padding:20px;text-align:center;color:#999;font-size:0.8rem;' +
+      `width:${v.offsetWidth}px;height:${v.offsetHeight}px;display:flex;align-items:center;justify-content:center`;
+    p.textContent = '[ Video ]';
+    backups.push({ video: v, parent: v.parentNode, placeholder: p });
+    v.parentNode.replaceChild(p, v);
+  });
+
+  try {
+    const root = document.getElementById('root');
+    const canvas = await html2canvas(root, {
+      backgroundColor: '#0b0f14',
+      scale: 2,
+      useCORS: true,
+      logging: false,
+    });
+    const imgData = canvas.toDataURL('image/png');
+    const { jsPDF } = window.jspdf;
+    const pxW = canvas.width, pxH = canvas.height;
+    const pdfW = 210;  // A4 mm
+    const pdfH = pxH * pdfW / pxW;
+    const pageH = 297; // A4 height mm
+    const pdf = new jsPDF('p', 'mm', 'a4');
+
+    let y = 0;
+    while (y < pdfH) {
+      if (y > 0) pdf.addPage();
+      pdf.addImage(imgData, 'PNG', 0, -y, pdfW, pdfH);
+      y += pageH;
+    }
+    pdf.save('trollfish_report.pdf');
+  } catch (e) {
+    alert('PDF export failed: ' + e.message);
+  }
+
+  // Restore videos
+  backups.forEach(({ video, parent, placeholder }) => {
+    if (placeholder.parentNode) placeholder.parentNode.replaceChild(video, placeholder);
+  });
+  if (btn) btn.style.display = '';
+}
+
+// ── GPS Map ────────────────────────────────────────────────────────────
+function initSegMap(containerId, gpsPath) {
+  const el = document.getElementById(containerId);
+  if (!el) return;
+  const map = L.map(el, { attributionControl: false, zoomControl: true });
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', { maxZoom: 19 }).addTo(map);
+
+  const latlngs = gpsPath.map(p => [p.lat, p.lon]);
+  const sogs = gpsPath.map(p => p.sog || 0);
+  const maxSog = Math.max(...sogs, 0.01);
+  for (let i = 0; i < latlngs.length - 1; i++) {
+    L.polyline([latlngs[i], latlngs[i + 1]], {
+      color: sogColor(sogs[i] / maxSog), weight: 3, opacity: 0.85,
+    }).addTo(map);
+  }
+  if (latlngs.length >= 2) {
+    L.circleMarker(latlngs[0], { radius: 4, color: '#00ff88', fillOpacity: 1 }).addTo(map).bindTooltip('Start');
+    L.circleMarker(latlngs.at(-1), { radius: 4, color: '#ff4444', fillOpacity: 1 }).addTo(map).bindTooltip('End');
+  }
+  map.fitBounds(L.latLngBounds(latlngs).pad(0.15));
+}
+
+function sogColor(f) {
+  const r = f < 0.5 ? 0 : Math.min(255, Math.round((f - 0.5) * 2 * 255));
+  const g = f < 0.25 ? Math.round(f * 4 * 255) : f < 0.75 ? 255 : Math.round((1 - f) * 4 * 255);
+  const b = f < 0.5 ? Math.round((1 - f * 2) * 255) : 0;
+  return `rgb(${r},${g},${b})`;
+}
+
+// ── Chart defaults ─────────────────────────────────────────────────────
+const CD = {
+  responsive: true, maintainAspectRatio: false,
+  plugins: { legend: { display: false } },
+  scales: {
+    x: { ticks: { color: '#9aa7b2', font: { size: 9 } }, grid: { color: '#1e2430' } },
+    y: { ticks: { color: '#9aa7b2', font: { size: 9 } }, grid: { color: '#1e2430' } },
+  },
+};
+
+function renderTimeline(canvas, data, yLabel, color) {
+  const pts = data.map(d => ({ x: d.t, y: d.v }));
+  const chart = new Chart(canvas, {
+    type: 'line',
+    data: { datasets: [{
+      data: pts, borderColor: color, backgroundColor: color + '22',
+      borderWidth: 1.5, fill: true, pointRadius: 0, tension: 0.2,
+    }] },
+    options: {
+      ...CD,
+      scales: {
+        x: { type: 'linear', ...CD.scales.x, title: { display: true, text: 'Time (s)', color: '#9aa7b2', font: { size: 9 } } },
+        y: { ...CD.scales.y, title: { display: true, text: yLabel, color: '#9aa7b2', font: { size: 9 } } },
+      },
+      plugins: { ...CD.plugins,
+        annotation: { annotations: { scrubLine: {
+          type: 'line', xMin: -1, xMax: -1,
+          borderColor: '#ffd700', borderWidth: 2, borderDash: [4, 2], display: false,
+        }}}
+      },
+      onClick: (evt, _el, ch) => {
+        const rect = canvas.getBoundingClientRect();
+        const xVal = ch.scales.x.getValueForPixel(evt.native.clientX - rect.left);
+        const segId = findSegIdForChart(ch);
+        if (segId && segmentVideos[segId]) segmentVideos[segId].currentTime = xVal;
+      },
+    },
+  });
+  return chart;
+}
+
+function updateScrubLines(segId, videoTime) {
+  const charts = segmentCharts[segId];
+  if (!charts) return;
+  for (const { chart } of charts) {
+    const ann = chart.options.plugins?.annotation?.annotations?.scrubLine;
+    if (ann) { ann.xMin = videoTime; ann.xMax = videoTime; ann.display = true; chart.update('none'); }
+  }
+}
+
+function findSegIdForChart(chart) {
+  for (const [sid, cs] of Object.entries(segmentCharts)) { if (cs.some(c => c.chart === chart)) return sid; }
+  return null;
+}
+
+function renderHikingHist(canvas, hist, color) {
+  new Chart(canvas, {
+    type: 'bar',
+    data: { labels: hist.bins.map(b => b.toFixed(0) + '°'),
+      datasets: [{ data: hist.counts, backgroundColor: color + '99', borderColor: color, borderWidth: 1, borderRadius: 2 }] },
+    options: { ...CD,
+      scales: { ...CD.scales,
+        x: { ...CD.scales.x, title: { display: true, text: 'Trunk (°)', color: '#9aa7b2', font: { size: 9 } } },
+        y: { ...CD.scales.y, beginAtZero: true, title: { display: true, text: 'Count', color: '#9aa7b2', font: { size: 9 } } },
+      },
+    },
+  });
+}
+
+function renderTrunkVsSog(canvas, data, color) {
+  const pts = data.points.map(p => ({ x: p[0], y: p[1] }));
+  const ds = [{ type: 'scatter', data: pts, backgroundColor: color + '55', borderColor: color + '88', pointRadius: 1.5, pointHoverRadius: 3 }];
+  if (data.fit_slope != null) {
+    const xs = pts.map(p => p.x), xMin = Math.min(...xs), xMax = Math.max(...xs);
+    ds.push({ type: 'line',
+      data: [{ x: xMin, y: data.fit_slope * xMin + data.fit_intercept }, { x: xMax, y: data.fit_slope * xMax + data.fit_intercept }],
+      borderColor: '#ffd700', borderWidth: 2, borderDash: [6, 3], pointRadius: 0, fill: false });
+  }
+  new Chart(canvas, { type: 'scatter', data: { datasets: ds },
+    options: { ...CD,
+      scales: {
+        x: { ...CD.scales.x, title: { display: true, text: 'SOG (kn)', color: '#9aa7b2', font: { size: 9 } } },
+        y: { ...CD.scales.y, title: { display: true, text: 'Trunk (°)', color: '#9aa7b2', font: { size: 9 } } },
+      },
+      plugins: { ...CD.plugins, tooltip: { callbacks: { label: c => `${c.parsed.x.toFixed(2)} kn, ${c.parsed.y.toFixed(1)}°` } } },
+    },
+  });
+}
+
+function renderSideLoad(canvas, data, color) {
+  const pts = data.times.map((t, i) => ({ x: t, y: data.values[i] }));
+  new Chart(canvas, { type: 'line',
+    data: { datasets: [{
+      data: pts, borderColor: color, backgroundColor: color + '22', borderWidth: 1.5,
+      fill: { target: 'origin', above: '#5cc8ff22', below: '#ff6b9d22' }, pointRadius: 0, tension: 0.2,
+    }] },
+    options: { ...CD,
+      scales: {
+        x: { type: 'linear', ...CD.scales.x, title: { display: true, text: 'Time (s)', color: '#9aa7b2', font: { size: 9 } } },
+        y: { ...CD.scales.y, title: { display: true, text: 'Load (Nm·s)', color: '#9aa7b2', font: { size: 9 } } },
+      },
+    },
+  });
+}
+
+// ── Heatmap with STL ───────────────────────────────────────────────────
+let boatGeomPromise = null;
+function loadBoatGeometry() {
+  if (!boatGeomPromise) {
+    boatGeomPromise = new Promise(resolve => {
+      new STLLoader().load('/api/assets/hull.stl', g => resolve(g), undefined, () => resolve(null));
+    });
+  }
+  return boatGeomPromise;
+}
+
+async function renderHeatmapWithBoat(canvas, hm, frustumSize) {
+  const w = canvas.width, h = canvas.height;
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x0b0f14);
+
+  const aspect = w / h;
+  const cam = new THREE.OrthographicCamera(
+    -frustumSize * aspect / 2, frustumSize * aspect / 2,
+    frustumSize / 2, -frustumSize / 2, 0.1, 100);
+  cam.position.set(hm.grid_center_x, 10, 0);
+  cam.lookAt(hm.grid_center_x, 0, 0);
+  cam.up.set(0, 0, -1);
+
+  scene.add(new THREE.AmbientLight(0xffffff, 0.7));
+  const dl = new THREE.DirectionalLight(0xffffff, 0.5);
+  dl.position.set(2, 8, -2); scene.add(dl);
+  scene.add(new THREE.GridHelper(10, 20, 0x1e2430, 0x1e2430));
+
+  const boatGeom = await loadBoatGeometry();
+  if (boatGeom) {
+    const mat = new THREE.MeshPhongMaterial({
+      color: 0xd9e6f2, emissive: 0x1e2b38, emissiveIntensity: 0.32,
+      specular: 0xffffff, shininess: 95, transparent: true, opacity: 0.88 });
+    const mesh = new THREE.Mesh(boatGeom, mat);
+    mesh.scale.set(0.01, 0.01, 0.01);
+    const rm = new THREE.Matrix4();
+    rm.set(0,0,-1,0, 0,1,0,0, 1,0,0,0, 0,0,0,1);
+    mesh.applyMatrix4(rm);
+    mesh.position.set(-2.974, 0, 0);
+    scene.add(mesh);
+  }
+
+  const img = new Image();
+  img.src = 'data:image/png;base64,' + hm.image_b64;
+  await new Promise(r => { img.onload = r; });
+  const tex = new THREE.Texture(img);
+  tex.needsUpdate = true; tex.minFilter = THREE.LinearFilter; tex.magFilter = THREE.LinearFilter;
+  const planeG = new THREE.PlaneGeometry(hm.grid_size_x, hm.grid_size_y);
+  const planeM = new THREE.MeshBasicMaterial({ map: tex, transparent: true, opacity: 0.65, side: THREE.DoubleSide, depthWrite: false });
+  const plane = new THREE.Mesh(planeG, planeM);
+  plane.rotation.x = -Math.PI / 2;
+  plane.position.set(hm.grid_center_x, 0.01, -hm.grid_center_y);
+  scene.add(plane);
+
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, preserveDrawingBuffer: true });
+  renderer.setSize(w, h);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.render(scene, cam);
+  renderer.dispose();
+}
+
+function addHeatmapLegend(parent, hm) {
+  const d = document.createElement('div');
+  d.className = 'heatmap-legend';
+  d.innerHTML = `<span>High</span><div class="gradient"></div><span>Low</span>
+    <span style="margin-left:6px">${hm.grid_size_x}m×${hm.grid_size_y}m · ${hm.point_count} pts</span>`;
+  parent.appendChild(d);
+}
+
+// ── Boot ──
+loadReport();
+</script>
+</body>
+</html>

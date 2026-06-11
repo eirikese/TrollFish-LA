@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="192" height="192" viewBox="0 0 192 192" role="img" aria-label="TrollFish">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#1a73e8"/>
+      <stop offset="100%" stop-color="#00bcd4"/>
+    </linearGradient>
+  </defs>
+  <rect width="192" height="192" rx="42" fill="url(#bg)"/>
+  <path d="M38 74h117c5 0 9 4 9 9v17c0 5-4 9-9 9H38c-5 0-9-4-9-9V83c0-5 4-9 9-9z" fill="#0b1220" opacity="0.22"/>
+  <path d="M44 76h104c6 0 10 4 10 10v13c0 6-4 10-10 10H44V76z" fill="#ffffff" opacity="0.93"/>
+  <path d="M44 76l-17 16 17 17" fill="#ffffff" opacity="0.93"/>
+  <circle cx="79" cy="92" r="10" fill="#1a73e8"/>
+  <path d="M97 84h37v8h-24v8h20v8h-20v16h-13V84z" fill="#1a73e8"/>
+</svg>

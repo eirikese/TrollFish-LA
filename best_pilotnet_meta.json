@@ -1,0 +1,21 @@
+{
+  "angle_mean": 88.94429755662736,
+  "angle_std": 9.87913755812305,
+  "input_size": [
+    66,
+    200
+  ],
+  "roi_crop": [
+    780,
+    1080,
+    200,
+    1685
+  ],
+  "target_col": "__train_target_deg",
+  "source_target_col": "angle_deg",
+  "target_mode": "uncorrected_runtime_yaw_subtract",
+  "target_expression": "clip(angle_deg + camera_yaw_deg, 0.0, 180.0) (runtime corrected=clip(pred - camera_yaw_deg, 0.0, 180.0))",
+  "yaw_col": "camera_yaw_deg",
+  "runtime_yaw_correction": true,
+  "angle_domain": "uncorrected_runtime_yaw_subtract"
+}

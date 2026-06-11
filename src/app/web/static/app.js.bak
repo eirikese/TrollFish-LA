@@ -1,0 +1,1584 @@
+/* TrollFish app.js — ES Module */
+const API = '/api';
+
+const state = {
+  projectId: null,
+  projects: [],
+  mapData: null,
+  cvStatuses: {},
+  athletes: [],
+  fileMeta: {},
+  activeVideoId: null,
+  windDeg: 0,
+  trackLayers: {},
+  posMarkers: {},
+  map: null,
+  videoColors: {},
+  jobId: null,
+  jobPollTimer: null,
+  segMode: false,
+  speedMode: false,
+  editingAthleteId: null,
+  rangeSelect: { active: false, videoId: null, startSec: null, endSec: null, startMarker: null, endMarker: null },
+  mediapipeWorkers: 2,
+  skeletonCoverage: {},   // fileId -> [{start_s, end_s}]
+  trackVisibility: {},    // fileId -> bool
+  dayFilter: null,        // null = all, else 'YYYY-MM-DD'
+};
+
+const PALETTE = ['#e74c3c','#3498db','#2ecc71','#f39c12','#9b59b6','#1abc9c','#e67e22','#00bcd4','#ff6b6b','#4ecdc4'];
+
+// ── Utils ──────────────────────────────────────────────────────────────
+function el(id) { return document.getElementById(id); }
+function fmt(s) { const m=Math.floor(s/60),ss=Math.floor(s%60); return `${m}:${ss.toString().padStart(2,'0')}`; }
+async function api(method, path, body) {
+  const opts = { method, headers: {} };
+  if (body !== undefined) { opts.body = JSON.stringify(body); opts.headers['Content-Type']='application/json'; }
+  const r = await fetch(API + path, opts);
+  if (!r.ok) throw new Error(await r.text());
+  return r.json().catch(()=>({}));
+}
+function haversineKm(la1,lo1,la2,lo2){
+  const R=6371,dL=(la2-la1)*Math.PI/180,dO=(lo2-lo1)*Math.PI/180;
+  const a=Math.sin(dL/2)**2+Math.cos(la1*Math.PI/180)*Math.cos(la2*Math.PI/180)*Math.sin(dO/2)**2;
+  return R*2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a));
+}
+function bearing(la1,lo1,la2,lo2){
+  const p1=la1*Math.PI/180,p2=la2*Math.PI/180,dl=(lo2-lo1)*Math.PI/180;
+  return(Math.atan2(Math.sin(dl)*Math.cos(p2),Math.cos(p1)*Math.sin(p2)-Math.sin(p1)*Math.cos(p2)*Math.cos(dl))*180/Math.PI+360)%360;
+}
+function windAngle(brg){
+  let d=Math.abs(brg-state.windDeg)%360; if(d>180)d=360-d; return d;
+}
+function speedColor(kt){
+  if(kt<4)return'#3b82f6';if(kt<6)return'#22c55e';if(kt<8)return'#eab308';if(kt<10)return'#f97316';return'#ef4444';
+}
+function segColor(brg){
+  const d=windAngle(brg);
+  if(d<45)return'#ef4444';if(d<90)return'#f97316';if(d<135)return'#eab308';return'#22c55e';
+}
+function confirmDialog(title, msg, cb) {
+  el('confirm-title').textContent = title;
+  el('confirm-msg').textContent = msg;
+  el('confirm-modal').classList.add('open');
+  const ok = el('btn-conf-ok');
+  const cancel = el('btn-conf-cancel');
+  function cleanup(){ el('confirm-modal').classList.remove('open'); ok.onclick=null; cancel.onclick=null; }
+  ok.onclick = ()=>{ cleanup(); cb(); };
+  cancel.onclick = ()=>{ cleanup(); };
+}
+
+// ── Project management ─────────────────────────────────────────────────
+async function loadProjects() {
+  const data = await api('GET','/projects');
+  state.projects = data.projects || data;
+  const sel = el('project-select');
+  sel.innerHTML = '<option value="">— select project —</option>';
+  for(const p of state.projects){
+    const o=document.createElement('option');
+    o.value=p.id; o.textContent=p.name;
+    sel.appendChild(o);
+  }
+  if(state.projectId) sel.value = state.projectId;
+}
+
+async function selectProject(id) {
+  state.projectId = id;
+  clearTrackLayers();
+  state.mapData = null; state.cvStatuses = {}; state.athletes = []; state.fileMeta = {};
+  state.trackVisibility = {}; state.dayFilter = null;
+  const hasPid = !!id;
+  el('btn-upload').disabled = !hasPid;
+  el('btn-process').disabled = !hasPid;
+  el('btn-run-all').disabled = !hasPid;
+  el('btn-del-proj').disabled = !hasPid;
+  el('btn-pose').disabled = true;
+  el('video-chip-bar').innerHTML = '';
+  el('files-list').innerHTML = '';
+  el('ath-list').innerHTML = '';
+  el('no-video').style.display='flex';
+  el('video-player').style.display='none';
+  el('video-player').src='';
+  state.activeVideoId = null;
+  if(!id) return;
+  await Promise.all([loadMapData(), loadAthletes()]);
+  renderVideoChips();
+  renderFilesList();
+  renderAthletes();
+}
+
+async function createProject(name) {
+  const p = await api('POST','/projects',{name});
+  await loadProjects();
+  el('project-select').value = p.id;
+  await selectProject(p.id);
+}
+
+async function deleteProject() {
+  if(!state.projectId) return;
+  const name = state.projects.find(p=>p.id===state.projectId)?.name || 'this project';
+  confirmDialog('Delete Project', `Delete "${name}" and all its files? This cannot be undone.`, async ()=>{
+    await api('DELETE',`/projects/${state.projectId}`);
+    state.projectId = null;
+    await loadProjects();
+    el('project-select').value = '';
+    await selectProject('');
+  });
+}
+
+// ── Data loading ───────────────────────────────────────────────────────
+async function loadMapData() {
+  if(!state.projectId) return;
+  try {
+    state.mapData = await api('GET',`/projects/${state.projectId}/map-data`);
+    // Normalize: API uses file_id, JS uses id
+    if(state.mapData.videos) state.mapData.videos = state.mapData.videos.map(v=>({...v,id:v.file_id}));
+    if(state.mapData.csvs)   state.mapData.csvs   = state.mapData.csvs.map(c=>({...c,id:c.file_id}));
+    state.cvStatuses = await api('GET',`/projects/${state.projectId}/cv/statuses`);
+    state.fileMeta = await api('GET',`/projects/${state.projectId}/file-meta`).catch(()=>({}));
+    assignVideoColors();
+    initTrackVisibility();
+    // Fetch skeleton coverage for completed videos
+    await loadAllSkeletonCoverages();
+    renderMap();
+    renderDayFilter();
+    renderTrackPanel();
+  } catch(e){ console.error(e); }
+}
+
+function computeDayLabel(ts) {
+  if(!ts) return null;
+  const d = new Date(ts * 1000);
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,'0')}-${String(d.getUTCDate()).padStart(2,'0')}`;
+}
+
+function assignVideoColors() {
+  if(!state.mapData) return;
+  const vids = state.mapData.videos || [];
+  const csvs = state.mapData.csvs || [];
+
+  // Assign colors based on athlete assignment; unassigned videos get a sequential color
+  let fallbackIdx = 0;
+  for(const v of vids) {
+    const meta = state.fileMeta[v.id] || {};
+    const athIdx = state.athletes.findIndex(a => a.id === meta.athlete_id);
+    state.videoColors[v.id] = athIdx >= 0 ? PALETTE[athIdx % PALETTE.length] : PALETTE[fallbackIdx++ % PALETTE.length];
+  }
+  // CSVs inherit the color of their matched video
+  const matchedVidByCSV = {};
+  for(const v of vids) { if(v.best_match_csv_id) matchedVidByCSV[v.best_match_csv_id] = v.id; }
+  for(const csv of csvs) {
+    const vid = matchedVidByCSV[csv.id];
+    state.videoColors[csv.id] = vid ? state.videoColors[vid] : '#2ea043';
+  }
+}
+
+function initTrackVisibility() {
+  const vids = state.mapData?.videos || [];
+  const csvs = state.mapData?.csvs || [];
+  const validIds = new Set([...vids.map(v => v.id), ...csvs.map(c => c.id)]);
+  // Purge stale entries from deleted files
+  for(const k of Object.keys(state.trackVisibility)) {
+    if(!validIds.has(k)) delete state.trackVisibility[k];
+  }
+  // Default: ALL tracks visible (user can hide individually)
+  for(const v of vids) { if(!(v.id in state.trackVisibility)) state.trackVisibility[v.id] = true; }
+  for(const csv of csvs) { if(!(csv.id in state.trackVisibility)) state.trackVisibility[csv.id] = true; }
+}
+
+function renderDayFilter() {
+  const row = el('day-filter-row');
+  const vids = state.mapData?.videos || [];
+  const csvs = state.mapData?.csvs || [];
+  const days = [...new Set([...vids, ...csvs].map(t => computeDayLabel(t.ts_start)).filter(Boolean))].sort();
+  row.innerHTML = '';
+  if(days.length < 2) { row.classList.remove('has-days'); return; }
+  row.classList.add('has-days');
+  const allBtn = document.createElement('button');
+  allBtn.className = 'day-btn' + (!state.dayFilter ? ' active' : '');
+  allBtn.textContent = 'All days';
+  allBtn.onclick = () => { state.dayFilter = null; renderDayFilter(); renderMap(); };
+  row.appendChild(allBtn);
+  for(const d of days) {
+    const btn = document.createElement('button');
+    btn.className = 'day-btn' + (state.dayFilter === d ? ' active' : '');
+    btn.textContent = d;
+    btn.onclick = () => { state.dayFilter = d; renderDayFilter(); renderMap(); };
+    row.appendChild(btn);
+  }
+}
+
+function renderTrackPanel() {
+  const list = el('track-panel-list');
+  const hdr  = el('track-panel-hdr');
+  list.innerHTML = '';
+  const vids = state.mapData?.videos || [];
+  const csvs = state.mapData?.csvs || [];
+
+  // Build link hints: vid -> csv name, csv -> [vid names]
+  const csvById = Object.fromEntries(csvs.map(c => [c.id, c]));
+  const csvMatchedBy = {}; // csvId -> [vidName, ...]
+  for(const v of vids) {
+    if(v.best_match_csv_id) {
+      if(!csvMatchedBy[v.best_match_csv_id]) csvMatchedBy[v.best_match_csv_id] = [];
+      csvMatchedBy[v.best_match_csv_id].push(v.filename || v.id);
+    }
+  }
+
+  function addRow(track, kind) {
+    const visible = state.trackVisibility[track.id] ?? true;
+    const color = state.videoColors[track.id] || '#888';
+    const name = track.filename || track.id;
+    const day = computeDayLabel(track.ts_start);
+
+    // Link hint
+    let linkHint = '';
+    if(kind === 'vid' && track.best_match_csv_id) {
+      const csv = csvById[track.best_match_csv_id];
+      if(csv) linkHint = `<span class="trk-link" title="GPS from: ${csv.filename||csv.id}">🔗</span>`;
+    } else if(kind === 'csv' && csvMatchedBy[track.id]?.length) {
+      linkHint = `<span class="trk-link" title="Videos: ${csvMatchedBy[track.id].join(', ')}">🔗</span>`;
+    }
+
+    const row = document.createElement('div');
+    row.className = 'trk-row';
+    row.innerHTML = `
+      <span class="trk-eye ${visible?'on':''}" title="${visible?'Hide':'Show'} track">👁</span>
+      <span class="trk-dot" style="background:${color}"></span>
+      <span class="trk-name" title="${name}">${name}</span>
+      ${linkHint}
+      ${day ? `<span class="trk-day">${day}</span>` : ''}
+      <span class="trk-badge ${kind}">${kind.toUpperCase()}</span>
+    `;
+    row.querySelector('.trk-eye').onclick = () => {
+      state.trackVisibility[track.id] = !state.trackVisibility[track.id];
+      renderTrackPanel();
+      renderMap();
+    };
+    list.appendChild(row);
+  }
+
+  for(const v of vids) addRow(v, 'vid');
+  for(const csv of csvs) addRow(csv, 'csv');
+
+  const count = vids.length + csvs.length;
+  const panel = el('track-panel');
+  const isCollapsed = panel.classList.contains('collapsed');
+  hdr.textContent = (isCollapsed ? '▸' : '▾') + ` Tracks (${count})`;
+  if(count > 0) panel.style.maxHeight = '';
+}
+
+function autoFocusTrackForVideo(fileId) {
+  // Ensure the selected video's track is visible; leave all CSV tracks untouched
+  state.trackVisibility[fileId] = true;
+}
+
+async function loadAllSkeletonCoverages() {
+  const vids = (state.mapData?.videos || []).filter(v => {
+    const st = state.cvStatuses[v.id];
+    return st && (st.status === 'completed' || st.status === 'running');
+  });
+  const results = await Promise.allSettled(
+    vids.map(v => fetch(`${API}/projects/${state.projectId}/videos/${v.id}/cv/skeleton-coverage`)
+      .then(r => r.ok ? r.json() : null)
+      .then(d => ({id: v.id, intervals: d?.intervals || []}))
+    )
+  );
+  for(const r of results) {
+    if(r.status === 'fulfilled' && r.value) {
+      state.skeletonCoverage[r.value.id] = r.value.intervals;
+    }
+  }
+}
+
+function isInCoverage(fileId, videoSec) {
+  if(videoSec == null) return false;
+  const intervals = state.skeletonCoverage[fileId];
+  if(!intervals || !intervals.length) return false;
+  for(const [s, e] of intervals) {
+    if(videoSec >= s - 0.5 && videoSec <= e + 0.5) return true;
+  }
+  return false;
+}
+
+async function loadAthletes() {
+  if(!state.projectId) return;
+  try { state.athletes = await api('GET',`/projects/${state.projectId}/athletes`); }
+  catch(e){ state.athletes=[]; }
+}
+
+async function saveAthletes() {
+  if(!state.projectId) return;
+  await api('PUT',`/projects/${state.projectId}/athletes`, state.athletes);
+}
+
+async function setFileMeta(fileId, meta) {
+  if(!state.projectId) return;
+  await api('PUT',`/projects/${state.projectId}/files/${fileId}/meta`, meta);
+  state.fileMeta[fileId] = {...(state.fileMeta[fileId]||{}), ...meta};
+  // Athlete assignment may change track color
+  assignVideoColors();
+  renderTrackPanel();
+  renderMap();
+}
+
+// ── Map rendering ──────────────────────────────────────────────────────
+function clearTrackLayers() {
+  for(const lg of Object.values(state.trackLayers)) { if(state.map) state.map.removeLayer(lg); }
+  state.trackLayers = {};
+  for(const entry of Object.values(state.posMarkers)) {
+    const m = entry?.marker ?? entry;
+    if(state.map && m) state.map.removeLayer(m);
+  }
+  state.posMarkers = {};
+  // Clear range markers
+  const rs = state.rangeSelect;
+  if(rs.startMarker && state.map){ state.map.removeLayer(rs.startMarker); rs.startMarker=null; }
+  if(rs.endMarker && state.map){ state.map.removeLayer(rs.endMarker); rs.endMarker=null; }
+}
+
+function renderMap() {
+  if(!state.map || !state.mapData) return;
+  clearTrackLayers();
+  const bounds = [];
+  const csvs = state.mapData.csvs || [];
+  const vids = state.mapData.videos || [];
+
+  // ── Build cut-range index: for each CSV, which absolute timestamp windows
+  //    are covered by a matched video's GPS points? Those segments get drawn
+  //    faded+dashed on the CSV track so the video track visually "replaces" them.
+  const csvCutRanges = {}; // csvId -> [{ts_min, ts_max}]
+  for(const v of vids) {
+    if(!v.best_match_csv_id || !v.points?.length) continue;
+    const tss = v.points.map(p => p.ts).filter(t => t != null);
+    if(!tss.length) continue;
+    const cid = v.best_match_csv_id;
+    if(!csvCutRanges[cid]) csvCutRanges[cid] = [];
+    csvCutRanges[cid].push({ts_min: Math.min(...tss), ts_max: Math.max(...tss)});
+  }
+  function isCutTs(csvId, ts) {
+    if(!ts) return false;
+    return (csvCutRanges[csvId] || []).some(r => ts >= r.ts_min && ts <= r.ts_max);
+  }
+  // Group consecutive same-style points into single polylines
+  function drawSegmented(pts, lg, getStyle, clickH) {
+    if(!pts.length) return;
+    let run = [pts[0]], runStyle = JSON.stringify(getStyle(pts[0]));
+    for(let i = 1; i < pts.length; i++) {
+      const s = JSON.stringify(getStyle(pts[i]));
+      if(s !== runStyle) {
+        if(run.length > 1) L.polyline(run.map(p=>[p.lat,p.lon]), JSON.parse(runStyle)).on('click',clickH).addTo(lg);
+        run = [pts[i-1], pts[i]]; runStyle = s;
+      } else { run.push(pts[i]); }
+    }
+    if(run.length > 1) L.polyline(run.map(p=>[p.lat,p.lon]), JSON.parse(runStyle)).on('click',clickH).addTo(lg);
+  }
+
+  function makeClickHandlerCSV(pts, csvId) {
+    return function() {
+      const vid = vids.find(v => v.best_match_csv_id === csvId);
+      if(vid) selectVideoById(vid.id);
+    };
+  }
+
+  function makeClickHandler(pts, v) {
+    return function(e) {
+      const ll = e.latlng;
+      let bestIdx=0, bestDist=Infinity;
+      pts.forEach((p,i)=>{ const d=(p.lat-ll.lat)**2+(p.lon-ll.lng)**2; if(d<bestDist){bestDist=d;bestIdx=i;} });
+      const nearest = pts[bestIdx];
+      if(state.rangeSelect.active && v.kind==='video') {
+        handleRangeClick(v.id, nearest.video_s ?? null);
+      } else if(nearest.video_s != null) {
+        if(state.activeVideoId !== v.id) selectVideoById(v.id);
+        const player = el('video-player');
+        const doSeek = ()=>{ player.currentTime = nearest.video_s; };
+        if(player.readyState >= 2) doSeek();
+        else player.addEventListener('loadedmetadata', doSeek, {once:true});
+      }
+    };
+  }
+
+  // ── CSV tracks (Vakaros, etc.) ─────────────────────────────────────
+  // Always shown as their own independent track. Portions whose timestamps
+  // fall within a matched video's GPS window are rendered faded+dashed
+  // to show that the video track "replaces" that segment visually.
+  for(const csv of csvs) {
+    if(!csv.points?.length) continue;
+    if(state.dayFilter && computeDayLabel(csv.ts_start) !== state.dayFilter) continue;
+    if(state.trackVisibility[csv.id] === false) continue;
+
+    const color = state.videoColors[csv.id] || '#2ea043';
+    const lg = L.layerGroup();
+    const clickH = makeClickHandlerCSV(csv.points, csv.id);
+    const hasCuts = !!(csvCutRanges[csv.id]?.length);
+
+    if(hasCuts) {
+      drawSegmented(csv.points, lg, p => (
+        isCutTs(csv.id, p.ts)
+          ? {color, weight:2, opacity:0.25, dashArray:'4 7', pane:'baseTrackPane'}
+          : {color, weight:3, opacity:0.78, pane:'baseTrackPane'}
+      ), clickH);
+    } else {
+      L.polyline(csv.points.map(p=>[p.lat,p.lon]),
+        {color, weight:3, opacity:0.78, pane:'baseTrackPane'}).on('click',clickH).addTo(lg);
+    }
+
+    bounds.push(...csv.points.map(p=>[p.lat,p.lon]));
+    lg.addTo(state.map);
+    state.trackLayers[csv.id] = lg;
+  }
+
+  // ── Video GPS tracks ─────────────────────────────────────────────
+  // Every video with GPS is drawn as its own colored track regardless of
+  // whether a Vakaros CSV is also visible. Both coexist independently.
+  for(const v of vids) {
+    if(!v.points?.length) continue;
+    if(state.dayFilter && computeDayLabel(v.ts_start) !== state.dayFilter) continue;
+
+    const pts = v.points;
+    const color = state.videoColors[v.id] || '#1d8fd8';
+    const lg = L.layerGroup();
+    const clickH = makeClickHandler(pts, {...v, kind:'video'});
+
+    if(state.trackVisibility[v.id] !== false) {
+      if(state.speedMode || state.segMode) {
+        for(let i=0;i<pts.length-1;i++){
+          const p1=pts[i], p2=pts[i+1];
+          let c;
+          if(state.speedMode){
+            const dt=(p2.ts||0)-(p1.ts||0);
+            const dkm=haversineKm(p1.lat,p1.lon,p2.lat,p2.lon);
+            const kt=dt>0 ? dkm/1.852/(dt/3600) : 0;
+            c=speedColor(kt);
+          } else {
+            c=segColor(bearing(p1.lat,p1.lon,p2.lat,p2.lon));
+          }
+          const processed = isInCoverage(v.id, p1.video_s);
+          L.polyline([[p1.lat,p1.lon],[p2.lat,p2.lon]],
+            {color:c, weight:processed?5:3, opacity:processed?0.92:0.45,
+             pane:processed?'processedTrackPane':'baseTrackPane'})
+            .on('click',clickH).addTo(lg);
+        }
+      } else {
+        const hasCoverage = !!(state.skeletonCoverage[v.id]?.length);
+        if(hasCoverage) {
+          drawSegmented(pts, lg, p => (
+            isInCoverage(v.id, p.video_s)
+              ? {color, weight: 5, opacity: 0.92, pane: 'processedTrackPane'}
+              : {color: '#4a5568', weight: 3, opacity: 0.45, dashArray:'4 5', pane: 'baseTrackPane'}
+          ), clickH);
+        } else {
+          L.polyline(pts.map(p=>[p.lat,p.lon]),
+            {color, weight:4, opacity:0.85, pane:'baseTrackPane'}).on('click',clickH).addTo(lg);
+        }
+      }
+      bounds.push(...pts.map(p=>[p.lat,p.lon]));
+    }
+
+    // Position arrow marker always added (still needed for timeupdate tracking)
+    const arrowHtml = `<div class="hdg-marker" style="width:20px;height:20px;display:flex;align-items:center;justify-content:center;">
+      <svg width="20" height="20" viewBox="0 0 20 20"><polygon points="10,2 4,18 10,13 16,18" fill="${color}" stroke="white" stroke-width="1.2"/></svg>
+    </div>`;
+    const arrowIcon = L.divIcon({html:arrowHtml,className:'',iconSize:[20,20],iconAnchor:[10,10]});
+    const marker = L.marker([pts[0].lat,pts[0].lon],{icon:arrowIcon,zIndexOffset:500}).addTo(state.map);
+    state.posMarkers[v.id] = {marker, pts};
+    lg.addTo(state.map);
+    state.trackLayers[v.id] = lg;
+  }
+
+  // ── Split label markers ────────────────────────────────────────────────
+  for(const v of vids) {
+    const splits = state.fileMeta[v.id]?.splits || [];
+    if(!splits.length) continue;
+    const pts = v.points || [];
+    if(!pts.length) continue;
+    const color = state.videoColors[v.id] || '#1d8fd8';
+    for(const s of splits) {
+      let bestPt = pts[0];
+      for(const p of pts) { if((p.video_s ?? Infinity) <= s.start_s) bestPt = p; else break; }
+      if(!bestPt) continue;
+      const labelHtml = `<div class="split-label-icon" style="border-color:${color};color:${color};">&#9986; ${s.name}</div>`;
+      const icon = L.divIcon({html:labelHtml, className:'', iconSize:null, iconAnchor:[0,0]});
+      L.marker([bestPt.lat, bestPt.lon], {icon, pane:'splitMarkersPane'})
+        .on('click', () => {
+          selectVideoById(v.id);
+          const player = el('video-player');
+          const doSeek = () => { player.currentTime = s.start_s; };
+          if(player.readyState >= 2) doSeek();
+          else player.addEventListener('loadedmetadata', doSeek, {once:true});
+        }).addTo(state.map);
+    }
+  }
+
+  if(bounds.length>0) { try{state.map.fitBounds(bounds,{padding:[16,16]});}catch(e){} }
+  el('speed-legend').style.display = state.speedMode ? 'block' : 'none';
+  el('seg-legend-row').style.display = state.segMode ? 'flex' : 'none';
+}
+
+function highlightTrack(fileId) {
+  for(const [id, lg] of Object.entries(state.trackLayers)) {
+    lg.eachLayer(l=>{ if(l.setStyle){ l.setStyle({weight: id===fileId?5:4, opacity: id===fileId?1:.8}); }});
+  }
+}
+
+function movePositionMarker(fileId, videoSec) {
+  const entry = state.posMarkers[fileId]; if(!entry) return;
+  const m = entry.marker ?? entry;
+  const pts = entry.pts ?? (state.mapData?.videos||[]).find(v=>v.id===fileId)?.points;
+  if(!pts?.length) return;
+  let bestIdx=0;
+  for(let i=0;i<pts.length;i++){ if(pts[i].video_s<=videoSec) bestIdx=i; else break; }
+  const best=pts[bestIdx];
+  if(!best) return;
+  m.setLatLng([best.lat, best.lon]);
+  // Rotate only the inner SVG, not the Leaflet positioning transform on markerEl
+  const next = pts[Math.min(bestIdx+1, pts.length-1)];
+  const hdg = (next && next!==best) ? bearing(best.lat,best.lon,next.lat,next.lon) : 0;
+  const markerEl = m.getElement();
+  if(markerEl) {
+    const svgEl = markerEl.querySelector('svg');
+    if(svgEl) svgEl.style.transform = `rotate(${hdg}deg)`;
+  }
+}
+
+// ── Wind overlay on map ────────────────────────────────────────────────
+let windMarker = null;
+let _windMoveEnd = null;
+function updateWindArrow(deg) {
+  state.windDeg = deg;
+  el('wind-deg').textContent = deg + '°';
+  el('compass-arrow').setAttribute('transform',`rotate(${deg},18,18)`);
+  if(!state.map) return;
+  if(windMarker) { state.map.removeLayer(windMarker); windMarker = null; }
+  if(_windMoveEnd) { state.map.off('moveend', _windMoveEnd); _windMoveEnd = null; }
+  const arrowHtml = `<div style="width:44px;height:44px;transform:rotate(${deg}deg);transform-origin:center;pointer-events:none;">
+    <svg width="44" height="44" viewBox="0 0 44 44">
+      <line x1="22" y1="38" x2="22" y2="10" stroke="#1d8fd8" stroke-width="2.5" opacity=".85"/>
+      <polygon points="22,3 14,17 22,12 30,17" fill="#1d8fd8" opacity=".95"/>
+    </svg></div>`;
+  const icon = L.divIcon({html:arrowHtml, className:'', iconSize:[44,44], iconAnchor:[22,22]});
+  windMarker = L.marker(state.map.getCenter(), {icon, interactive:false, zIndexOffset:-9999}).addTo(state.map);
+  _windMoveEnd = () => { if(windMarker) windMarker.setLatLng(state.map.getCenter()); };
+  state.map.on('moveend', _windMoveEnd);
+  if(state.segMode || state.speedMode) renderMap();
+}
+
+function initCompassDrag() {
+  const svg = el('wind-compass');
+  let dragging = false;
+  function getAngle(e) {
+    const r = svg.getBoundingClientRect();
+    const cx=r.left+r.width/2, cy=r.top+r.height/2;
+    const clE = e.touches?e.touches[0]:e;
+    let a = Math.atan2(clE.clientX-cx, cy-clE.clientY)*180/Math.PI;
+    return Math.round((a+360)%360);
+  }
+  svg.addEventListener('pointerdown',e=>{dragging=true;svg.setPointerCapture(e.pointerId);updateWindArrow(getAngle(e));});
+  svg.addEventListener('pointermove',e=>{if(dragging)updateWindArrow(getAngle(e));});
+  svg.addEventListener('pointerup',()=>{dragging=false;});
+}
+
+// ── Video ──────────────────────────────────────────────────────────────
+function renderVideoChips() {
+  const bar = el('video-chip-bar');
+  bar.innerHTML = '';
+  const vids = state.mapData?.videos || [];
+  for(const v of vids){
+    const c = document.createElement('div');
+    c.className = 'v-chip' + (v.id===state.activeVideoId?' active':'');
+    const status = state.cvStatuses[v.id]?.status || '';
+    const dotClass = status==='completed'?'ok':status==='running'?'running':status==='failed'?'failed':'';
+    const color = state.videoColors[v.id] || PALETTE[0];
+    c.innerHTML = `<span class="cv-dot ${dotClass}"></span><span style="width:8px;height:8px;border-radius:50%;background:${color};flex-shrink:0;display:inline-block;"></span>${v.filename||v.name||'video'}`;
+    c.title = v.filename || v.name || '';
+    c.onclick = ()=>selectVideoById(v.id);
+    bar.appendChild(c);
+  }
+}
+
+function selectVideoById(fileId) {
+  state.activeVideoId = fileId;
+  el('btn-pose').disabled = false;
+  const player = el('video-player');
+  player.src = `/api/projects/${state.projectId}/videos/${fileId}/playback`;
+  player.style.display = 'block';
+  el('no-video').style.display = 'none';
+  player.load();
+  autoFocusTrackForVideo(fileId);
+  renderVideoChips();
+  renderTrackPanel();
+  renderMap();
+  highlightTrack(fileId);
+}
+
+function initVideoControls() {
+  const player = el('video-player');
+  const seek = el('video-seek');
+  const timeLabel = el('video-time');
+  const playBtn = el('btn-play-pause');
+  player.addEventListener('timeupdate',()=>{
+    if(player.duration){
+      seek.value = Math.round(player.currentTime/player.duration*10000);
+      timeLabel.textContent = fmt(player.currentTime)+' / '+fmt(player.duration);
+      if(state.activeVideoId) movePositionMarker(state.activeVideoId, player.currentTime);
+    }
+  });
+  player.addEventListener('play',()=>{ playBtn.textContent='⏸'; });
+  player.addEventListener('pause',()=>{ playBtn.textContent='▶'; });
+  player.addEventListener('ended',()=>{ playBtn.textContent='▶'; });
+  seek.addEventListener('input',()=>{
+    if(player.duration) player.currentTime = seek.value/10000*player.duration;
+  });
+  el('btn-play-pause').onclick = ()=>{ player.paused?player.play():player.pause(); };
+  el('btn-skip-back').onclick = ()=>{ player.currentTime=Math.max(0, player.currentTime-10); };
+  el('btn-skip-fwd').onclick = ()=>{ player.currentTime=Math.min(player.duration||0, player.currentTime+10); };
+  el('speed-select').addEventListener('change',e=>{ player.playbackRate=parseFloat(e.target.value); });
+  el('btn-fullscreen').onclick = ()=>{ if(player.requestFullscreen) player.requestFullscreen(); };
+  document.addEventListener('keydown',e=>{
+    if(e.target.tagName==='INPUT'||e.target.tagName==='SELECT'||e.target.tagName==='TEXTAREA') return;
+    if(e.code==='Space'){ e.preventDefault(); player.paused?player.play():player.pause(); }
+    if(e.code==='ArrowLeft'){ player.currentTime=Math.max(0,player.currentTime-10); }
+    if(e.code==='ArrowRight'){ player.currentTime=Math.min(player.duration||0,player.currentTime+10); }
+  });
+}
+
+// ── Files tab ──────────────────────────────────────────────────────────
+function renderFilesList() {
+  const list = el('files-list');
+  list.innerHTML = '';
+  if(!state.mapData) return;
+  const all = [...(state.mapData.videos||[]).map(v=>({...v,kind:'video'})),
+               ...(state.mapData.csvs||[]).map(c=>({...c,kind:'csv'}))];
+
+  // Group by day (ts_start), then within each day by kind
+  const dayMap = new Map(); // day -> [files]
+  for(const f of all) {
+    const day = computeDayLabel(f.ts_start) || 'Unknown';
+    if(!dayMap.has(day)) dayMap.set(day, []);
+    dayMap.get(day).push(f);
+  }
+  const sortedDays = [...dayMap.keys()].sort();
+
+  for(const day of sortedDays) {
+    if(sortedDays.length > 1) {
+      const hdr = document.createElement('div');
+      hdr.className = 'day-group-hdr';
+      hdr.textContent = day === 'Unknown' ? 'Unknown date' : day;
+      list.appendChild(hdr);
+    }
+    for(const f of dayMap.get(day)) {
+      const meta = state.fileMeta[f.id] || {};
+      const ath = state.athletes.find(a=>a.id===meta.athlete_id);
+      const athIdx = ath ? state.athletes.indexOf(ath) : -1;
+      const athColor = athIdx >= 0 ? PALETTE[athIdx % PALETTE.length] : null;
+      const status = state.cvStatuses[f.id]?.status||'';
+      const div = document.createElement('div');
+      div.className='file-item';
+      const cvText = f.kind==='video' ? (status?`[${status}]`:'') : '';
+      const cvClass = status==='completed'?'ok':status==='running'?'running':status==='failed'?'failed':'';
+      const sz = f.size_bytes ? (f.size_bytes/1048576).toFixed(1)+'MB' : '';
+      const colorDot = athColor ? `<span style="width:8px;height:8px;border-radius:50%;background:${athColor};flex-shrink:0;display:inline-block;"></span>` : '';
+      div.innerHTML = `
+        <span class="f-kind ${f.kind}">${f.kind==='video'?'VID':'CSV'}</span>
+        ${colorDot}
+        <span class="f-name" title="${f.filename||f.name||'unknown'}">${f.filename||f.name||'unknown'}</span>
+        <span class="f-size">${sz}</span>
+        ${f.kind==='video'?`<span class="f-cv ${cvClass}">${cvText}</span>`:''}
+        <span class="f-athlete-tag" data-fid="${f.id}" title="${ath?ath.name:'Assign athlete'}">${ath?ath.name:'—'}</span>
+        <button class="f-del-btn" data-fid="${f.id}" title="Delete file">🗑</button>
+      `;
+      div.querySelector('.f-name').onclick = ()=>{ if(f.kind==='video') selectVideoById(f.id); };
+      div.querySelector('.f-del-btn').onclick = ()=>deleteFile(f.id, f.filename||f.name||f.id);
+      div.querySelector('.f-athlete-tag').onclick = (e)=>openAssignPopup(f.id, e.target);
+      if(f.kind==='video') renderSplitsSection(f.id, div);
+      list.appendChild(div);
+    }
+  }
+  const hasVids = (state.mapData.videos||[]).length>0;
+  el('btn-run-all').disabled = !hasVids;
+}
+
+async function deleteFile(fileId, name) {
+  if(!state.projectId) return;
+  confirmDialog('Delete File', `Delete "${name}"? This cannot be undone.`, async ()=>{
+    try {
+      await api('DELETE',`/projects/${state.projectId}/segments/${fileId}`);
+    } catch(e) {
+      let msg = e.message || String(e);
+      try { msg = JSON.parse(msg)?.detail || msg; } catch(_) {}
+      alert(`Could not delete "${name}":\n${msg}`);
+      return;
+    }
+    // Reset player if the deleted file was active
+    if(state.activeVideoId === fileId) {
+      state.activeVideoId = null;
+      const player = el('video-player');
+      player.pause(); player.src = ''; player.style.display = 'none';
+      const noVid = document.getElementById('no-video');
+      if(noVid) noVid.style.display = 'flex';
+      const poseBtn = el('btn-pose'); if(poseBtn) poseBtn.disabled = true;
+    }
+    // Purge stale visibility entry right away
+    delete state.trackVisibility[fileId];
+    await loadMapData();
+    renderVideoChips();
+    renderFilesList();
+  });
+}
+
+// ── Athlete assign popup ───────────────────────────────────────────────
+function openAssignPopup(fileId, anchor) {
+  const popup = el('assign-popup');
+  popup.innerHTML = '';
+  const noneOpt = document.createElement('div');
+  noneOpt.className='assign-opt'; noneOpt.textContent='— Unassign —';
+  noneOpt.onclick = async()=>{ await setFileMeta(fileId,{athlete_id:null}); closePopup(); renderFilesList(); };
+  popup.appendChild(noneOpt);
+  for(const a of state.athletes){
+    const opt = document.createElement('div');
+    opt.className='assign-opt'; opt.textContent=`${a.name} (${a.weight??'?'}kg)`;
+    opt.onclick = async()=>{ await setFileMeta(fileId,{athlete_id:a.id}); closePopup(); renderFilesList(); };
+    popup.appendChild(opt);
+  }
+  const rect=anchor.getBoundingClientRect();
+  popup.style.top=(rect.bottom+4)+'px'; popup.style.left=rect.left+'px';
+  popup.style.display='block';
+  function closePopup(){ popup.style.display='none'; document.removeEventListener('click',outsideClick); }
+  function outsideClick(e){ if(!popup.contains(e.target)&&e.target!==anchor) closePopup(); }
+  setTimeout(()=>document.addEventListener('click',outsideClick),50);
+}
+
+// ── Athletes tab ───────────────────────────────────────────────────────
+function renderAthletes() {
+  const list = el('ath-list');
+  list.innerHTML = '';
+  for(const a of state.athletes){
+    const idx = state.athletes.indexOf(a);
+    const color = PALETTE[idx % PALETTE.length];
+    const div = document.createElement('div');
+    div.className='ath-item';
+    div.innerHTML = `
+      <span class="ath-color" style="background:${color}"></span>
+      <span class="ath-name">${a.name}</span>
+      <span class="ath-weight">${a.weight!=null?a.weight+'kg':''}</span>
+      <button class="ath-del" data-aid="${a.id}" title="Delete athlete">✕</button>
+    `;
+    div.querySelector('.ath-del').onclick = ()=>deleteAthlete(a.id);
+    list.appendChild(div);
+  }
+}
+
+function deleteAthlete(id) {
+  const ath=state.athletes.find(a=>a.id===id);
+  if(!ath) return;
+  confirmDialog('Delete Athlete', `Remove "${ath.name}"?`, async ()=>{
+    state.athletes = state.athletes.filter(a=>a.id!==id);
+    await saveAthletes();
+    renderAthletes();
+    renderFilesList();
+  });
+}
+
+function openAthleteEdit(id) {
+  state.editingAthleteId = id || null;
+  const a = id ? state.athletes.find(a=>a.id===id) : null;
+  el('ath-name-in').value = a?.name||'';
+  el('ath-weight-in').value = a?.weight||'';
+  el('ath-edit-row').classList.add('open');
+  el('ath-name-in').focus();
+}
+
+async function saveAthlete() {
+  const name = el('ath-name-in').value.trim();
+  const weight = parseFloat(el('ath-weight-in').value)||null;
+  if(!name) return;
+  if(state.editingAthleteId) {
+    const a = state.athletes.find(a=>a.id===state.editingAthleteId);
+    if(a){ a.name=name; a.weight=weight; }
+  } else {
+    state.athletes.push({id: crypto.randomUUID(), name, weight});
+  }
+  await saveAthletes();
+  renderAthletes();
+  renderFilesList();
+  // Athlete colors may have changed — re-assign and re-draw
+  assignVideoColors();
+  renderTrackPanel();
+  renderMap();
+  el('ath-edit-row').classList.remove('open');
+  state.editingAthleteId = null;
+}
+
+// ── Upload ─────────────────────────────────────────────────────────────
+async function uploadFiles(files) {
+  const fd = new FormData();
+  for(const f of files) fd.append('files',f);
+  const fill = el('upload-fill');
+  const badge = el('btn-upload');
+  badge.disabled = true;
+  fill.style.width='0%';
+  return new Promise((resolve,reject)=>{
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST',`${API}/projects/${state.projectId}/uploads`);
+    xhr.upload.addEventListener('progress',e=>{
+      if(e.lengthComputable){ const pct=Math.round(e.loaded/e.total*100); fill.style.width=pct+'%'; badge.textContent=`⬆ ${pct}%`; }
+    });
+    xhr.addEventListener('load',()=>{
+      fill.style.width='0%'; badge.disabled=false; badge.textContent='⬆ Upload';
+      if(xhr.status>=200&&xhr.status<300) resolve(JSON.parse(xhr.responseText||'{}'));
+      else reject(new Error(xhr.responseText));
+    });
+    xhr.addEventListener('error',()=>{ fill.style.width='0%'; badge.disabled=false; badge.textContent='⬆ Upload'; reject(new Error('Network error')); });
+    xhr.send(fd);
+  });
+}
+
+// ── Job polling ────────────────────────────────────────────────────────
+function setBadge(text,cls){
+  const b=el('job-badge'); b.textContent=text; b.className=cls||''; b.style.display=text?'':'none';
+}
+
+function startJobPoll(jobId) {
+  state.jobId = jobId;
+  if(state.jobPollTimer) clearInterval(state.jobPollTimer);
+  el('proc-prog-row').style.display='flex';
+  state.jobPollTimer = setInterval(()=>pollJob(jobId), 1500);
+}
+
+async function pollJob(jobId) {
+  try {
+    const j = await api('GET',`/jobs/${jobId}`);
+    const pct = Math.round((j.progress??0)*100);
+    el('proc-fill').style.width=pct+'%'; el('proc-pct').textContent=pct+'%';
+    el('proc-msg').textContent=j.message||j.status||'';
+    if(j.status==='running') setBadge('⟳ Processing…','running');
+    if(j.status==='completed'||j.status==='failed') {
+      clearInterval(state.jobPollTimer); state.jobPollTimer=null;
+      el('proc-prog-row').style.display='none';
+      if(j.status==='completed') { setBadge('✓ Done','completed'); await loadMapData(); renderVideoChips(); renderFilesList(); }
+      else setBadge('✗ Failed','failed');
+      setTimeout(()=>setBadge(''),5000);
+    }
+  } catch(e){ /* ignore transient errors */ }
+}
+
+function getWorkersValue() { return parseInt(el('workers-input')?.value||'2')||2; }
+
+async function runSkeletonForVideo(fileId) {
+  if(!state.projectId) { alert('No project selected'); return; }
+  if(!fileId) { alert('No video selected'); return; }
+  console.log('[pose] start', fileId, 'workers:', getWorkersValue());
+  try {
+    const r = await api('POST',`/projects/${state.projectId}/jobs/skeleton`,{video_file_ids:[fileId], mediapipe_workers:getWorkersValue()});
+    console.log('[pose] job started', r);
+    startJobPoll(r.id);
+  } catch(e){ console.error('[pose] error', e); alert('Failed to start job: '+(e.message||String(e))); }
+}
+
+async function runSkeletonForAll() {
+  if(!state.projectId) return;
+  const ids = (state.mapData?.videos||[]).map(v=>v.id);
+  if(!ids.length) return;
+  try {
+    const r = await api('POST',`/projects/${state.projectId}/jobs/skeleton`,{video_file_ids:ids, mediapipe_workers:getWorkersValue()});
+    startJobPoll(r.id);
+  } catch(e){ alert('Failed to start job: '+e.message); }
+}
+
+// ── Range selection ────────────────────────────────────────────────────
+function activateRangeMode() {
+  const rs = state.rangeSelect;
+  rs.active = !rs.active;
+  rs.videoId = null; rs.startSec = null; rs.endSec = null;
+  if(rs.startMarker && state.map){ state.map.removeLayer(rs.startMarker); rs.startMarker=null; }
+  if(rs.endMarker && state.map){ state.map.removeLayer(rs.endMarker); rs.endMarker=null; }
+  const btn = el('btn-range-mode');
+  if(rs.active) { btn.classList.add('active'); updateRangeInfo(); }
+  else { btn.classList.remove('active'); updateRangeInfo(); }
+}
+
+function updateRangeInfo() {
+  const rs = state.rangeSelect;
+  const info = el('range-info');
+  const procBtn = el('btn-proc-range');
+  const clearBtn = el('btn-clear-range');
+  if(!rs.active && rs.startSec == null) { info.style.display='none'; procBtn.style.display='none'; clearBtn.style.display='none'; el('btn-label-split').style.display='none'; return; }
+  info.style.display='inline';
+  if(rs.startSec == null) { info.textContent = '⬡ Click track to set start'; procBtn.style.display='none'; clearBtn.style.display='none'; el('btn-label-split').style.display='none'; }
+  else if(rs.endSec == null) { info.textContent = `Start: ${rs.startSec.toFixed(1)}s — click again for end`; procBtn.style.display='none'; clearBtn.style.display='inline-block'; el('btn-label-split').style.display='none'; }
+  else { info.textContent = `Range: ${rs.startSec.toFixed(1)}s → ${rs.endSec.toFixed(1)}s`; procBtn.style.display='inline-block'; clearBtn.style.display='inline-block'; el('btn-label-split').style.display='inline-block'; }
+}
+
+function handleRangeClick(videoId, videoSec) {
+  if(videoSec == null) return;
+  const rs = state.rangeSelect;
+  const color = state.videoColors[videoId] || '#f0b429';
+  const pts = (state.mapData?.videos||[]).find(v=>v.id===videoId)?.points||[];
+  function closestLL(sec) {
+    let best=pts[0];
+    for(const p of pts){ if(p.video_s<=sec) best=p; else break; }
+    return best ? [best.lat, best.lon] : null;
+  }
+  if(rs.startSec == null || videoId !== rs.videoId) {
+    // First click — set start
+    rs.videoId = videoId; rs.startSec = videoSec; rs.endSec = null;
+    if(rs.startMarker && state.map) state.map.removeLayer(rs.startMarker);
+    if(rs.endMarker && state.map) state.map.removeLayer(rs.endMarker);
+    rs.endMarker = null;
+    const ll = closestLL(videoSec);
+    if(ll && state.map) rs.startMarker = L.circleMarker(ll,{radius:7,color:'#2ea043',weight:2,fillColor:'#2ea043',fillOpacity:.9}).addTo(state.map);
+  } else {
+    // Second click — set end (ensure start < end)
+    const [s,e] = videoSec < rs.startSec ? [videoSec, rs.startSec] : [rs.startSec, videoSec];
+    rs.startSec = s; rs.endSec = e;
+    if(rs.endMarker && state.map) state.map.removeLayer(rs.endMarker);
+    const ll = closestLL(rs.endSec);
+    if(ll && state.map) rs.endMarker = L.circleMarker(ll,{radius:7,color:'#e3342f',weight:2,fillColor:'#e3342f',fillOpacity:.9}).addTo(state.map);
+    // Deactivate range-click mode once range is set
+    rs.active = false;
+    el('btn-range-mode')?.classList.remove('active');
+  }
+  updateRangeInfo();
+}
+
+function clearRange() {
+  const rs = state.rangeSelect;
+  rs.active=false; rs.videoId=null; rs.startSec=null; rs.endSec=null;
+  if(rs.startMarker && state.map){ state.map.removeLayer(rs.startMarker); rs.startMarker=null; }
+  if(rs.endMarker && state.map){ state.map.removeLayer(rs.endMarker); rs.endMarker=null; }
+  el('btn-range-mode')?.classList.remove('active');
+  updateRangeInfo();
+}
+
+async function processRange() {
+  const rs = state.rangeSelect;
+  if(!state.projectId || !rs.videoId || rs.startSec==null || rs.endSec==null) return;
+  const videoRanges = {[rs.videoId]:{start_sec: rs.startSec, end_sec: rs.endSec}};
+  try {
+    const r = await api('POST',`/projects/${state.projectId}/jobs/skeleton`,{
+      video_file_ids:[rs.videoId], mediapipe_workers:getWorkersValue(), video_ranges:videoRanges, force:true
+    });
+    startJobPoll(r.id);
+    clearRange();
+  } catch(e){ alert('Failed to start range job: '+e.message); }
+}
+
+// ── Named splits ──────────────────────────────────────────────────────
+function renderSplitsSection(fileId, container) {
+  const splits = state.fileMeta[fileId]?.splits || [];
+  if(!splits.length) return;
+  const color = state.videoColors[fileId] || '#888';
+  const sec = document.createElement('div');
+  sec.className = 'split-section';
+  sec.innerHTML = `<div class="split-section-hdr">✂ Splits</div>`;
+  for(const s of splits) {
+    const row = document.createElement('div');
+    row.className = 'split-item';
+    const dot = document.createElement('span');
+    dot.style.cssText = `width:7px;height:7px;border-radius:50%;background:${color};flex-shrink:0;display:inline-block;`;
+    const nameEl = document.createElement('span');
+    nameEl.className = 'split-name'; nameEl.title = s.name; nameEl.textContent = s.name;
+    nameEl.onclick = () => {
+      selectVideoById(fileId);
+      const player = el('video-player');
+      const doSeek = () => { player.currentTime = s.start_s; };
+      if(player.readyState >= 2) doSeek(); else player.addEventListener('loadedmetadata', doSeek, {once:true});
+    };
+    const rangeEl = document.createElement('span');
+    rangeEl.className = 'split-range';
+    rangeEl.textContent = `${fmt(s.start_s)}→${fmt(s.end_s)}`;
+    const delBtn = document.createElement('button');
+    delBtn.className = 'split-del'; delBtn.title = 'Delete split'; delBtn.textContent = '✕';
+    delBtn.onclick = () => deleteSplit(fileId, s.id);
+    row.append(dot, nameEl, rangeEl, delBtn);
+    sec.appendChild(row);
+  }
+  container.appendChild(sec);
+}
+
+async function deleteSplit(fileId, splitId) {
+  const splits = (state.fileMeta[fileId]?.splits || []).filter(s => s.id !== splitId);
+  await setFileMeta(fileId, { splits });
+  renderFilesList(); renderMap();
+}
+
+function labelCurrentRange() {
+  const rs = state.rangeSelect;
+  if(!rs.videoId || rs.startSec == null || rs.endSec == null) return;
+  const start = Math.min(rs.startSec, rs.endSec);
+  const end = Math.max(rs.startSec, rs.endSec);
+  el('split-modal-range').textContent = `${fmt(start)} → ${fmt(end)}`;
+  el('split-name-in').value = '';
+  el('split-modal').classList.add('open');
+  setTimeout(() => el('split-name-in').focus(), 50);
+  el('btn-split-save').onclick = async () => {
+    const name = el('split-name-in').value.trim();
+    if(!name) return;
+    el('split-modal').classList.remove('open');
+    const splits = [...(state.fileMeta[rs.videoId]?.splits || [])];
+    splits.push({id: crypto.randomUUID(), name, start_s: start, end_s: end});
+    await setFileMeta(rs.videoId, {splits});
+    renderFilesList(); renderMap();
+  };
+}
+
+// ── STL resize handle ────────────────────────────────────────────────
+function initStlResize() {
+  const handle = el('stl-resize-handle');
+  if(!handle) return;
+  const left = el('panel-left');
+  let dragging = false;
+  handle.addEventListener('pointerdown', e => {
+    dragging = true;
+    handle.setPointerCapture(e.pointerId);
+    handle.classList.add('dragging');
+  });
+  handle.addEventListener('pointermove', e => {
+    if(!dragging) return;
+    const rect = left.getBoundingClientRect();
+    const controlsH = el('map-controls').getBoundingClientRect().height;
+    const total = rect.height - controlsH - handle.offsetHeight;
+    const mapH = Math.max(80, Math.min(total - 80, e.clientY - rect.top));
+    const stlH = total - mapH;
+    el('map').style.flex = `0 0 ${mapH}px`;
+    el('stl-inline').style.flex = `0 0 ${stlH}px`;
+    if(state.map) state.map.invalidateSize();
+  });
+  handle.addEventListener('pointerup', () => { dragging = false; handle.classList.remove('dragging'); });
+}
+
+// ── Resizable divider ──────────────────────────────────────────────────────
+function initDivider() {
+  const div=el('divider'), left=el('panel-left'), layout=el('layout');
+  let dragging=false, startX=0, startW=0;
+  div.addEventListener('mousedown',e=>{ dragging=true; startX=e.clientX; startW=left.offsetWidth; div.classList.add('dragging'); e.preventDefault(); });
+  document.addEventListener('mousemove',e=>{ if(!dragging) return; const w=Math.max(200,Math.min(startW+(e.clientX-startX),layout.offsetWidth-200)); left.style.width=w+'px'; left.style.flex='none'; if(state.map) state.map.invalidateSize(); });
+  document.addEventListener('mouseup',()=>{ if(dragging){dragging=false;div.classList.remove('dragging');} });
+}
+
+// ── Tabs ───────────────────────────────────────────────────────────────
+function initTabs() {
+  document.querySelectorAll('.tab-btn').forEach(btn=>{
+    btn.addEventListener('click',()=>{
+      document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
+      document.querySelectorAll('.tab-panel').forEach(p=>p.classList.remove('active-tab'));
+      btn.classList.add('active');
+      el(btn.dataset.tab).classList.add('active-tab');
+    });
+  });
+}
+
+// ── Init ───────────────────────────────────────────────────────────────
+function initMap() {
+  state.map = L.map('map',{zoomControl:true,preferCanvas:false}).setView([55.5,10.5],8);
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',{attribution:'© CartoDB',maxZoom:18}).addTo(state.map);
+  // Custom panes for z-ordering: base tracks under processed segments
+  state.map.createPane('baseTrackPane').style.zIndex = '390';
+  state.map.createPane('processedTrackPane').style.zIndex = '405';
+  state.map.createPane('splitMarkersPane').style.zIndex = '450';
+}
+
+async function init() {
+  initMap();
+  initDivider();
+  initTabs();
+  initVideoControls();
+  initCompassDrag();
+
+  await loadProjects();
+
+  // Project select
+  el('project-select').addEventListener('change',e=>selectProject(e.target.value));
+
+  // New project
+  el('btn-new-proj').onclick = ()=>{ el('new-proj-name').value=''; el('new-proj-modal').classList.add('open'); setTimeout(()=>el('new-proj-name').focus(),50); };
+  el('btn-new-cancel').onclick = ()=>el('new-proj-modal').classList.remove('open');
+  el('btn-new-confirm').onclick = async()=>{
+    const name=el('new-proj-name').value.trim(); if(!name) return;
+    el('new-proj-modal').classList.remove('open');
+    await createProject(name);
+  };
+  el('new-proj-name').addEventListener('keydown',e=>{ if(e.key==='Enter') el('btn-new-confirm').click(); });
+
+  // Delete project
+  el('btn-del-proj').onclick = ()=>deleteProject();
+
+  // Upload
+  el('btn-upload').onclick = ()=>el('file-input').click();
+  el('file-input').addEventListener('change',async e=>{
+    const files=Array.from(e.target.files); e.target.value=''; if(!files.length) return;
+    try {
+      await uploadFiles(files);
+      await loadMapData(); renderVideoChips(); renderFilesList();
+      // Switch to Files tab so the user can see the uploaded file
+      document.querySelector('.tab-btn[data-tab="tab-files"]')?.click();
+    } catch(err){ alert('Upload failed: '+err.message); el('btn-upload').disabled=false; el('btn-upload').textContent='⬆ Upload'; }
+  });
+
+  // Process (run skeleton for all videos)
+  el('btn-process').onclick = ()=>runSkeletonForAll();
+
+  // Run skeleton
+  el('btn-pose').onclick = ()=>runSkeletonForVideo(state.activeVideoId);
+  el('btn-run-all').onclick = ()=>runSkeletonForAll();
+
+  // Refresh
+  el('btn-refresh').onclick = async()=>{ await loadMapData(); renderVideoChips(); renderFilesList(); };
+
+  // Segment / speed overlays
+  el('seg-toggle').addEventListener('change',e=>{
+    state.segMode=e.target.checked; if(state.segMode) state.speedMode=false;
+    el('speed-toggle').checked=false;
+    renderMap();
+  });
+  el('speed-toggle').addEventListener('change',e=>{
+    state.speedMode=e.target.checked; if(state.speedMode) state.segMode=false;
+    el('seg-toggle').checked=false;
+    renderMap();
+  });
+
+  // Athletes
+  el('btn-add-ath').onclick = ()=>openAthleteEdit(null);
+  el('btn-save-ath').onclick = ()=>saveAthlete();
+  el('btn-cancel-ath').onclick = ()=>{ el('ath-edit-row').classList.remove('open'); state.editingAthleteId=null; };
+  el('ath-weight-in').addEventListener('keydown',e=>{ if(e.key==='Enter') saveAthlete(); });
+
+  // Workers slider
+  const workersIn = el('workers-input');
+  if(workersIn) workersIn.addEventListener('change',e=>{ state.mediapipeWorkers=parseInt(e.target.value)||2; });
+
+  // Range selection
+  el('btn-range-mode').onclick = ()=>activateRangeMode();
+  el('btn-clear-range').onclick = ()=>clearRange();
+  el('btn-proc-range').onclick = ()=>processRange();
+  el('btn-label-split').onclick = ()=>labelCurrentRange();
+  updateRangeInfo();
+
+  // Track panel header toggle
+  el('track-panel-hdr').onclick = () => {
+    el('track-panel').classList.toggle('collapsed');
+    renderTrackPanel();
+  };
+
+  // STL
+  el('btn-stl').onclick = ()=>openStlViewer();
+  el('btn-stl-close').onclick = ()=>{ el('stl-inline').classList.remove('open'); el('panel-left').classList.remove('stl-open'); el('stl-inline').dispatchEvent(new Event('close')); setTimeout(()=>{ if(state.map) state.map.invalidateSize(); }, 50); };
+  initStlResize();
+
+  // Split modal
+  el('btn-split-cancel').onclick = ()=>el('split-modal').classList.remove('open');
+  el('split-modal').addEventListener('click', e=>{ if(e.target===el('split-modal')) el('split-modal').classList.remove('open'); });
+  el('split-name-in').addEventListener('keydown', e=>{ if(e.key==='Enter') el('btn-split-save').click(); });
+
+  // Confirm modal close on outside click
+  el('new-proj-modal').addEventListener('click',e=>{ if(e.target===el('new-proj-modal')) el('new-proj-modal').classList.remove('open'); });
+  el('confirm-modal').addEventListener('click',e=>{ if(e.target===el('confirm-modal')) el('confirm-modal').classList.remove('open'); });
+}
+
+// ── STL Viewer ─────────────────────────────────────────────────────────
+const SKEL_CONNECTIONS = [
+  [0,1],[1,2],[2,3],[3,7],[0,4],[4,5],[5,6],[6,8],[9,10],[11,12],[11,13],[13,15],
+  [15,17],[15,19],[15,21],[17,19],[12,14],[14,16],[16,18],[16,20],[16,22],[18,20],
+  [11,23],[12,24],[23,24],[23,25],[24,26],[25,27],[26,28],[27,29],[28,30],[29,31],
+  [30,32],[27,31],[28,32]
+];
+
+async function loadSkeletonFrames(projectId, fileId) {
+  try {
+    const resp = await fetch(`${API}/projects/${projectId}/videos/${fileId}/cv/skeleton`);
+    if(!resp.ok) return null;
+    const text = await resp.text();
+    const frames = [];
+    for(const line of text.split('\n')) {
+      const t = line.trim(); if(!t) continue;
+      try {
+        const obj = JSON.parse(t);
+        if(obj.video_s != null && obj.landmarks?.length >= 33)
+          frames.push({video_s: obj.video_s, lm: obj.landmarks});
+      } catch {}
+    }
+    frames.sort((a,b)=>a.video_s-b.video_s);
+    return frames.length ? frames : null;
+  } catch { return null; }
+}
+
+function skelBinarySearch(frames, t) {
+  let lo=0, hi=frames.length-1;
+  while(lo<hi){ const m=Math.floor((lo+hi+1)/2); if(frames[m].video_s<=t) lo=m; else hi=m-1; }
+  return frames[lo];
+}
+
+// Pre-initialise so onclick handlers don't throw before the viewer opens
+window.stlSetCamera = () => {};
+
+async function openStlViewer() {
+  const modal = el('stl-inline');
+  if(modal.classList.contains('open')) return; // already open
+  modal.classList.add('open');
+  el('panel-left').classList.add('stl-open');
+  await new Promise(r => requestAnimationFrame(r)); // let layout settle
+
+  // ── Use the main video player directly ─────────────────────────────
+  const mainVid = el('video-player');
+
+  // ── Three.js imports ────────────────────────────────────────────────
+  const {
+    Scene, PerspectiveCamera, WebGLRenderer,
+    AmbientLight, DirectionalLight,
+    Mesh, MeshPhongMaterial, MeshStandardMaterial, Color,
+    GridHelper, AxesHelper,
+    BufferGeometry, BufferAttribute,
+    LineSegments, LineBasicMaterial, Points, PointsMaterial,
+    SphereGeometry, Matrix4, Vector3
+  } = await import('/static/vendor/three.module.js');
+  const {STLLoader}      = await import('/static/vendor/STLLoader.js');
+  const {OrbitControls}  = await import('/static/vendor/OrbitControls.js');
+
+  // ── Scene ───────────────────────────────────────────────────────────
+  const wrap = el('stl-3d-wrap');
+  const W = wrap.clientWidth  || wrap.offsetWidth  || 800;
+  const H = wrap.clientHeight || wrap.offsetHeight || 600;
+
+  const scene    = new Scene();
+  scene.background = new Color(0x11151c);
+
+  const camera   = new PerspectiveCamera(50, W / H, 0.01, 500);
+  camera.position.set(2, 2, 3);
+
+  // Let Three.js create its own canvas and append to the wrap div
+  const renderer = new WebGLRenderer({antialias: true, powerPreference: 'high-performance'});
+  renderer.setSize(W, H);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+  wrap.appendChild(renderer.domElement);
+
+  const controls = new OrbitControls(camera, renderer.domElement);
+  controls.target.set(-1.5, 0.3, 0);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.08;
+  controls.update();
+
+  // Lights
+  scene.add(new AmbientLight(0xffffff, 0.6));
+  const dl = new DirectionalLight(0xffffff, 0.9);
+  dl.position.set(4, 8, 4);
+  scene.add(dl);
+
+  // Grid + Axes
+  const grid = new GridHelper(12, 12, 0x2b3448, 0x1b2231);
+  scene.add(grid);
+  scene.add(new AxesHelper(1.5));
+
+  let sceneNeedsRender = true;
+  controls.addEventListener('change', () => { sceneNeedsRender = true; });
+
+  // ── Hull STL ────────────────────────────────────────────────────────
+  // Coordinate mapping: boat world [X_fore, Y_port, Z_up] → Three.js [X, Z, -Y]
+  // Hull STL is in mm; scale 0.01 to convert to metres.
+  // Rotation matrix [[0,0,-1],[0,1,0],[1,0,0]] aligns STL local → boat world → Three.js
+  let hullMesh = null;
+  const stlLoader = new STLLoader();
+  stlLoader.load('/api/assets/hull.stl', geom => {
+    geom.computeVertexNormals();
+    hullMesh = new Mesh(geom, new MeshPhongMaterial({
+      color: 0x2a7fc4, specular: 0x112233, shininess: 120
+    }));
+    hullMesh.scale.set(0.01, 0.01, 0.01);
+    // Bake STL-local → scene rotation:
+    const rotMat = new Matrix4();
+    rotMat.set(0,0,-1,0, 0,1,0,0, 1,0,0,0, 0,0,0,1);
+    hullMesh.applyMatrix4(rotMat);
+    hullMesh.position.set(-2.974, 0, 0);
+    scene.add(hullMesh);
+    sceneNeedsRender = true;
+  }, undefined, err => console.warn('Hull STL load failed:', err));
+
+  // ── Skeleton geometry ────────────────────────────────────────────────
+  // boat[x,y,z] → scene[x, z, -y] (Three.js Y-up, matching reference viewer)
+  const NC = SKEL_CONNECTIONS.length;
+  const NJ = 33;
+
+  const bonePos  = new Float32Array(NC * 6);   // 2 verts × 3 components per bone
+  const jointPos = new Float32Array(NJ * 3);
+
+  const boneGeom  = new BufferGeometry();
+  const boneAttr  = new BufferAttribute(bonePos,  3);
+  boneAttr.setUsage(35048); // THREE.DynamicDrawUsage
+  boneGeom.setAttribute('position', boneAttr);
+  boneGeom.setDrawRange(0, NC * 2);
+
+  const jointGeom = new BufferGeometry();
+  const jointAttr = new BufferAttribute(jointPos, 3);
+  jointAttr.setUsage(35048);
+  jointGeom.setAttribute('position', jointAttr);
+
+  const boneMesh  = new LineSegments(boneGeom,  new LineBasicMaterial({color: 0x7affc8}));
+  const jointMesh = new Points(jointGeom, new PointsMaterial({color: 0x5cc8ff, size: 0.04, sizeAttenuation: true}));
+  boneMesh.visible  = false;
+  jointMesh.visible = false;
+  scene.add(boneMesh);
+  scene.add(jointMesh);
+
+  // COM sphere
+  const comSphere = new Mesh(
+    new SphereGeometry(0.03, 14, 14),
+    new MeshPhongMaterial({color: 0xff5c5c, emissive: 0x441111})
+  );
+  comSphere.visible = false;
+  scene.add(comSphere);
+
+  // ── Segmental Centre-of-Mass (port of skeleton_metrics.py) ───────────
+  // lm: array of 33 [x,y,z] in boat-world coords
+  function computeCOM(lm) {
+    function pt(i) { return lm[i] || null; }
+    function mid(a, b) {
+      const pa = pt(a), pb = pt(b);
+      if(pa && pb) return [(pa[0]+pb[0])/2, (pa[1]+pb[1])/2, (pa[2]+pb[2])/2];
+      return pa || pb || null;
+    }
+    function addSeg(segs, p1, p2, mf, cf) {
+      if(p1 && p2) segs.push([p1, p2, mf, cf]);
+    }
+    function segCom(p1, p2, cf) {
+      return [p1[0]+cf*(p2[0]-p1[0]), p1[1]+cf*(p2[1]-p1[1]), p1[2]+cf*(p2[2]-p1[2])];
+    }
+
+    const midHip = mid(23, 24), midShoulder = mid(11, 12), headTop = mid(7, 8);
+    const segs = [];
+    // Axial
+    addSeg(segs, midShoulder, headTop,       0.081, 1.000); // Head
+    addSeg(segs, midShoulder, midHip,        0.497, 0.500); // Trunk
+    // Arms
+    addSeg(segs, pt(11), pt(13),  0.028, 0.436);
+    addSeg(segs, pt(13), pt(15),  0.016, 0.430);
+    addSeg(segs, pt(15), pt(17),  0.006, 0.506);
+    addSeg(segs, pt(12), pt(14),  0.028, 0.436);
+    addSeg(segs, pt(14), pt(16),  0.016, 0.430);
+    addSeg(segs, pt(16), pt(18),  0.006, 0.506);
+    // Legs
+    addSeg(segs, pt(23), pt(25),  0.100,  0.433);
+    addSeg(segs, pt(25), pt(27),  0.0465, 0.433);
+    addSeg(segs, pt(27), pt(31),  0.0145, 0.500);
+    addSeg(segs, pt(24), pt(26),  0.100,  0.433);
+    addSeg(segs, pt(26), pt(28),  0.0465, 0.433);
+    addSeg(segs, pt(28), pt(32),  0.0145, 0.500);
+
+    let totalMass = 0, cx = 0, cy = 0, cz = 0;
+    for(const [p1, p2, mf, cf] of segs) {
+      const sc = segCom(p1, p2, cf);
+      cx += mf * sc[0]; cy += mf * sc[1]; cz += mf * sc[2];
+      totalMass += mf;
+    }
+    if(totalMass < 0.35) return null;
+    return [cx/totalMass, cy/totalMass, cz/totalMass]; // boat-world [x, y, z]
+  }
+
+  function updateSkeletonMesh(lm) {
+    // Fill joint positions — boat[x,y,z] → scene[x, z, -y]
+    // Some landmarks can be null (occluded); use 0 so the geometry stays valid.
+    for(let i = 0; i < NJ; i++) {
+      const p = lm[i];
+      jointPos[i*3]   = p ? p[0] : 0;
+      jointPos[i*3+1] = p ? p[2] : 0;
+      jointPos[i*3+2] = p ? -p[1] : 0;
+    }
+    // Fill bone positions; collapse null-endpoint bones to a zero-length segment
+    for(let c = 0; c < NC; c++) {
+      const [a, b] = SKEL_CONNECTIONS[c];
+      const pa = lm[a], pb = lm[b];
+      bonePos[c*6]   = pa ? pa[0] : 0; bonePos[c*6+1] = pa ? pa[2] : 0; bonePos[c*6+2] = pa ? -pa[1] : 0;
+      bonePos[c*6+3] = pb ? pb[0] : 0; bonePos[c*6+4] = pb ? pb[2] : 0; bonePos[c*6+5] = pb ? -pb[1] : 0;
+    }
+    boneGeom.attributes.position.needsUpdate  = true;
+    jointGeom.attributes.position.needsUpdate = true;
+
+    // Segmental COM in boat-world coords, then convert to scene coords
+    const com = computeCOM(lm);
+    if(com) {
+      comSphere.position.set(com[0], com[2], -com[1]); // boat→scene
+      if(comSphere.visible) comSphere.visible = true;
+    }
+
+    // Live metrics panel
+    const trunkDeg = computeTrunkAngle(lm);
+    updateDialAndMetrics(trunkDeg, lm, com);
+
+    sceneNeedsRender = true;
+  }
+
+  function computeTrunkAngle(lm) {
+    // Shoulder midpoint - hip midpoint, angle with Z-up (in boat coords)
+    const l11=lm[11],l12=lm[12],l23=lm[23],l24=lm[24];
+    if(!l11||!l12||!l23||!l24) return null;
+    const sx = (l11[0]+l12[0])/2, sy = (l11[1]+l12[1])/2, sz = (l11[2]+l12[2])/2;
+    const hx = (l23[0]+l24[0])/2, hy = (l23[1]+l24[1])/2, hz = (l23[2]+l24[2])/2;
+    const dx = sx-hx, dy = sy-hy, dz = sz-hz;
+    const len = Math.sqrt(dx*dx + dy*dy + dz*dz);
+    if(len < 1e-6) return null;
+    // Dot with Z-up [0,0,1]
+    const dot = dz / len;
+    return Math.acos(Math.max(-1, Math.min(1, dot))) * 180 / Math.PI;
+  }
+
+  const needleEl   = el('stl-dial-needle');
+  const dialValEl  = el('stl-dial-val');
+  const mTrunkEl   = el('stl-m-trunk');
+  const mHipXEl    = el('stl-m-hipx');
+  const mHipYEl    = el('stl-m-hipy');
+  const mHipZEl    = el('stl-m-hipz');
+
+  function updateDialAndMetrics(trunkDeg, lm, com) {
+    if(trunkDeg !== null) {
+      const clamp = Math.max(0, Math.min(90, trunkDeg));
+      const rad = ((clamp / 90) * Math.PI) - (Math.PI/2);
+      const nx = 60 + 45 * Math.cos(rad);
+      const ny = 70 + 45 * Math.sin(rad);
+      needleEl.setAttribute('x2', nx.toFixed(1));
+      needleEl.setAttribute('y2', ny.toFixed(1));
+      dialValEl.textContent = trunkDeg.toFixed(1) + '°';
+      mTrunkEl.textContent  = trunkDeg.toFixed(1) + '°';
+    }
+    if(com) {
+      // Show COM in boat-world coordinates: x=fore/aft, y=port/stbd, z=up
+      mHipXEl.textContent = com[0].toFixed(3) + ' m';
+      mHipYEl.textContent = com[1].toFixed(3) + ' m';
+      mHipZEl.textContent = com[2].toFixed(3) + ' m';
+    }
+  }
+
+  // ── Load skeleton NDJSON ─────────────────────────────────────────────
+  let skelFrames = null;
+  const skelStatusEl = el('stl-skel-status');
+  skelStatusEl.textContent = 'Loading skeleton…';
+  skelStatusEl.className = '';
+
+  if(state.activeVideoId && state.projectId) {
+    skelFrames = await loadSkeletonFrames(state.projectId, state.activeVideoId);
+  }
+
+  if(skelFrames && skelFrames.length) {
+    boneMesh.visible  = true;
+    jointMesh.visible = true;
+    comSphere.visible = true;
+    skelStatusEl.textContent = `✓ ${skelFrames.length} skeleton frames`;
+    skelStatusEl.className = 'ok';
+    // Show first frame immediately
+    updateSkeletonMesh(skelFrames[0].lm);
+    // Aim camera at athlete
+    const lm0 = skelFrames[0].lm;
+    const hx = (lm0[23][0]+lm0[24][0])/2;
+    const hy = (lm0[23][2]+lm0[24][2])/2;
+    const hz = -(lm0[23][1]+lm0[24][1])/2;
+    controls.target.set(hx, hy + 0.3, hz);
+    camera.position.set(hx + 2.5, hy + 1.5, hz + 2.5);
+    controls.update();
+  } else {
+    skelStatusEl.textContent = 'No skeleton — run Pose first';
+  }
+
+  // ── Camera presets ───────────────────────────────────────────────────
+  const BOAT_CTR = new Vector3(-1.5, 0.3, 0); // approx centre of hull in scene
+
+  function animCameraTo(pos, tgt, ms = 450) {
+    const p0 = camera.position.clone();
+    const t0 = controls.target.clone();
+    const t1 = performance.now();
+    function step(now) {
+      const raw = Math.min((now - t1) / ms, 1);
+      const t = raw < 0.5 ? 4*raw*raw*raw : 1 - Math.pow(-2*raw+2,3)/2;
+      camera.position.lerpVectors(p0, pos, t);
+      controls.target.lerpVectors(t0, tgt, t);
+      controls.update();
+      sceneNeedsRender = true;
+      if(raw < 1) requestAnimationFrame(step);
+    }
+    requestAnimationFrame(step);
+  }
+
+  window.stlSetCamera = (name) => {
+    const tgt = BOAT_CTR.clone();
+    switch(name) {
+      case 'default': animCameraTo(new Vector3(2.5, 2, 3.5),   tgt); break;
+      case 'side':    animCameraTo(new Vector3(-1.5, 1.5, -4), tgt); break;  // port side
+      case 'top':     animCameraTo(new Vector3(-1.5, 5, 0.1),  tgt); break;
+      case 'front':   animCameraTo(new Vector3(1.5, 1, 0),     tgt); break;  // from bow
+      case 'rear':    animCameraTo(new Vector3(-5, 1, 0),      tgt); break;  // from stern
+      case 'athlete':
+        if(skelFrames?.length) {
+          const lm = skelFrames[0].lm;
+          const ax = (lm[23][0]+lm[24][0])/2;
+          const ay = (lm[23][2]+lm[24][2])/2;
+          const az = -(lm[23][1]+lm[24][1])/2;
+          animCameraTo(new Vector3(ax+2.2, ay+1.2, az+1.5), new Vector3(ax, ay+0.3, az));
+        }
+        break;
+    }
+  };
+
+  // ── Visibility toggles ───────────────────────────────────────────────
+  function tog(id, fn) {
+    const cb = document.getElementById(id);
+    if(cb) cb.addEventListener('change', e => { fn(e.target.checked); sceneNeedsRender = true; });
+  }
+  tog('stl-tog-hull',   v => { if(hullMesh) hullMesh.visible = v; });
+  tog('stl-tog-skel',   v => { boneMesh.visible  = v && !!(skelFrames?.length); });
+  tog('stl-tog-joints', v => { jointMesh.visible = v && !!(skelFrames?.length); });
+  tog('stl-tog-com',    v => { comSphere.visible = v && !!(skelFrames?.length); });
+  tog('stl-tog-grid',   v => { grid.visible = v; });
+
+  // ── Animation loop (demand-render) ───────────────────────────────────
+  let animId;
+  let lastRenderTs = 0;
+
+  function animate(ts = 0) {
+    animId = requestAnimationFrame(animate);
+    controls.update();
+
+    // Update skeleton from main video time
+    if(skelFrames?.length) {
+      const t = mainVid.readyState >= 1 ? mainVid.currentTime : 0;
+      const frame = skelBinarySearch(skelFrames, t);
+      if(frame) updateSkeletonMesh(frame.lm);
+    }
+
+    const elapsed = ts - lastRenderTs;
+    const playing = !mainVid.paused;
+    const minMs   = playing ? 33 : 250; // ~30 fps playing, ~4 fps idle
+    if(sceneNeedsRender || elapsed >= minMs) {
+      renderer.render(scene, camera);
+      sceneNeedsRender = false;
+      lastRenderTs = ts;
+    }
+  }
+  animate();
+
+  // ── Resize handler ───────────────────────────────────────────────────
+  function onResize() {
+    if(!modal.classList.contains('open')) return;
+    const w = wrap.clientWidth || wrap.offsetWidth;
+    const h = wrap.clientHeight || wrap.offsetHeight;
+    if(!w || !h) return;
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+    renderer.setSize(w, h);
+    sceneNeedsRender = true;
+  }
+  window.addEventListener('resize', onResize);
+  // Re-sync size one tick later in case layout wasn't fully flushed yet
+  setTimeout(onResize, 50);
+
+  // ── Cleanup on close ─────────────────────────────────────────────────
+  modal.addEventListener('close', () => {
+    cancelAnimationFrame(animId);
+    renderer.dispose();
+    // Remove renderer's canvas from the wrap div so next open starts fresh
+    if(renderer.domElement.parentNode === wrap) wrap.removeChild(renderer.domElement);
+    window.removeEventListener('resize', onResize);
+    window.stlSetCamera = () => {};
+    modal.classList.remove('open');
+    el('panel-left').classList.remove('stl-open');
+  }, {once: true});
+}
+
+// ── Boot ───────────────────────────────────────────────────────────────
+init();

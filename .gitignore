@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+workspace_data/
+*.mp4
+*.MP4
+debug_api_csvs/
