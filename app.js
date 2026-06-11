@@ -6740,7 +6740,11 @@ function initTrackVisibility() {
     if(!validIds.has(k)) delete state.trackVisibility[k];
   }
   for(const v of vids) {
-    if(!(v.id in state.trackVisibility)) state.trackVisibility[v.id] = !!isPlaybackOnlyVideo(v);
+    if(v.id in state.trackVisibility) continue;
+    // A video with its own GoPro GPS track defaults to visible (so the track shows
+    // on every reload). A playback-only clip with no telemetry has nothing of its
+    // own to draw, so its default doesn't matter — keep it visible too.
+    state.trackVisibility[v.id] = true;
   }
   for(const csv of csvs) { if(!(csv.id in state.trackVisibility)) state.trackVisibility[csv.id] = true; }
 }
