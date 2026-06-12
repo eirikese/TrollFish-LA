@@ -3,7 +3,7 @@
 import * as DB from './modules/db.js';
 import * as FM from './modules/file-manager.js';
 import * as Pipeline from './modules/pipeline.js?v=20260604pose2';
-import * as PoseEngine from './modules/pose-engine.js?v=20260604pose2';
+import * as PoseEngine from './modules/pose-engine.js?v=20260611pose2d1';
 import * as Storage from './modules/storage.js';
 import { matchVideoTracksToCsv } from './modules/matcher.js?v=20260527detail1';
 import { buildReportData, generateDensityGrid } from './modules/report-builder.js?v=20260604pose2';
@@ -124,6 +124,8 @@ const state = {
   timelineStatsWindowSec: 1,
   timelineStatOverlayGraph: false,
   timelineSogGapStitching: false,
+  poseMode: '3d',
+  poseMinConfidence: 0.8,
   poseInputMaxDim: 480,
   poseExactSegmentSeek: false,
   timelineMetricOverlayPrefs: {},
@@ -194,6 +196,8 @@ const HIDDEN_VIDEO_SLOTS_KEY_PREFIX = 'trollfish_hiddenVideoSlots_';
 const TL_STATS_WINDOW_KEY = 'trollfish_tlStatsWindowSec_v1';
 const TL_STATS_OVERLAY_GRAPH_KEY = 'trollfish_tlStatsOverlayGraph_v1';
 const TL_SOG_GAP_STITCHING_KEY = 'trollfish_tlSogGapStitching_v1';
+const POSE_MODE_KEY = 'trollfish_poseMode_v1';
+const POSE_MIN_CONFIDENCE_KEY = 'trollfish_poseMinConfidence_v1';
 const POSE_INPUT_MAX_DIM_KEY = 'trollfish_poseInputMaxDim_v1';
 const POSE_EXACT_SEGMENT_SEEK_KEY = 'trollfish_poseExactSegmentSeek_v1';
 const API_CSV_CONFIG_KEY = 'trollfish_apiCsvConfig_v1';
@@ -368,13 +372,43 @@ function normalizePoseInputMaxDim(value) {
   return 480;
 }
 
+function normalizePoseMode(value) {
+  return String(value || '').toLowerCase() === '2d' ? '2d' : '3d';
+}
+
+function normalizePoseMinConfidence(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return 0.8;
+  return Math.max(0, Math.min(1, Math.round(num * 100) / 100));
+}
+
 function loadPoseProcessingSettings() {
+  state.poseMode = normalizePoseMode(loadJsonLocal(POSE_MODE_KEY, '3d'));
+  state.poseMinConfidence = normalizePoseMinConfidence(loadJsonLocal(POSE_MIN_CONFIDENCE_KEY, 0.8));
   state.poseInputMaxDim = normalizePoseInputMaxDim(loadJsonLocal(POSE_INPUT_MAX_DIM_KEY, 480));
   state.poseExactSegmentSeek = !!loadJsonLocal(POSE_EXACT_SEGMENT_SEEK_KEY, false);
+  const modeSelect = el('pose-mode-select');
+  if (modeSelect) modeSelect.value = state.poseMode;
+  const thresholdInput = el('pose-2d-threshold-input');
+  if (thresholdInput) thresholdInput.value = String(state.poseMinConfidence);
   const sizeSelect = el('pose-input-size-select');
   if (sizeSelect) sizeSelect.value = String(state.poseInputMaxDim);
   const exactToggle = el('pose-exact-segment-seek-toggle');
   if (exactToggle) exactToggle.checked = !!state.poseExactSegmentSeek;
+}
+
+function setPoseMode(value) {
+  state.poseMode = normalizePoseMode(value);
+  saveJsonLocal(POSE_MODE_KEY, state.poseMode);
+  const modeSelect = el('pose-mode-select');
+  if (modeSelect) modeSelect.value = state.poseMode;
+}
+
+function setPoseMinConfidence(value) {
+  state.poseMinConfidence = normalizePoseMinConfidence(value);
+  saveJsonLocal(POSE_MIN_CONFIDENCE_KEY, state.poseMinConfidence);
+  const thresholdInput = el('pose-2d-threshold-input');
+  if (thresholdInput) thresholdInput.value = String(state.poseMinConfidence);
 }
 
 function setPoseInputMaxDim(value) {
@@ -6572,6 +6606,12 @@ function getKnownSkeletonCoverage(fileId) {
   ];
 }
 
+function isPoseCoverageCompatibleWithCurrentMode(fileId) {
+  const currentMode = getPoseMode();
+  const recordedMode = normalizePoseMode(state.cvStatuses?.[fileId]?.pose_mode || '3d');
+  return recordedMode === currentMode;
+}
+
 function isSkeletonRangeReady(fileId, startSec, endSec, durationSec = null, tolerance = 1.25) {
   const start = Number(startSec) || 0;
   const duration = Number(durationSec);
@@ -12113,6 +12153,12 @@ function getPoseInputMaxDim() {
   if (value >= 640) return 640;
   return 480;
 }
+function getPoseMode() {
+  return normalizePoseMode(el('pose-mode-select')?.value || state.poseMode);
+}
+function getPoseMinConfidence() {
+  return normalizePoseMinConfidence(el('pose-2d-threshold-input')?.value ?? state.poseMinConfidence);
+}
 function isPoseExactSegmentSeekEnabled() {
   return !!state.poseExactSegmentSeek;
 }
@@ -12130,6 +12176,16 @@ function areBoomPredictionsEnabled() {
 }
 function areRudderPredictionsEnabled() {
   return state.advancedFeatures?.rudderPredictions !== false;
+}
+function getPoseProcessingOptions() {
+  return {
+    poseMode: getPoseMode(),
+    poseMinConfidence: getPoseMinConfidence(),
+    poseInputMaxDim: getPoseInputMaxDim(),
+    exactSegmentSeek: isPoseExactSegmentSeekEnabled(),
+    enableBoomPrediction: areBoomPredictionsEnabled(),
+    enableRudderPrediction: areRudderPredictionsEnabled(),
+  };
 }
 function isRealtimePoseEnabled() { return false; }
 
@@ -12240,6 +12296,7 @@ function normalizeSegmentRunOpts(segmentOpts = {}) {
     endSec,
     segmentName: segmentName || null,
     fps,
+    forceReplaceRange: segmentOpts?.forceReplaceRange === true,
   };
 }
 
@@ -12381,6 +12438,7 @@ async function runSkeletonForVideo(fileId, segmentOpts = {}) {
         endSec: normalizedSegmentOpts.endSec,
         segmentName: segName || undefined,
         fps: normalizedSegmentOpts.fps ?? undefined,
+        forceReplaceRange: normalizedSegmentOpts.forceReplaceRange || undefined,
       });
       _queuedSegmentRuns.set(fileId, q);
       console.log(`[Pose] queued segment processing for ${fileId} (queue=${q.length})`);
@@ -12414,12 +12472,10 @@ async function runSkeletonForVideo(fileId, segmentOpts = {}) {
     const opts = {
       fps,
       model,
-      poseInputMaxDim: getPoseInputMaxDim(),
-      exactSegmentSeek: isPoseExactSegmentSeekEnabled(),
-      enableBoomPrediction: areBoomPredictionsEnabled(),
-      enableRudderPrediction: areRudderPredictionsEnabled(),
+      ...getPoseProcessingOptions(),
       ...getPoseAthleteOptionsForVideo(fileRec),
     };
+    if (normalizedSegmentOpts.forceReplaceRange) opts.forceReplaceRange = true;
     // If segment bounds provided (video-local seconds), limit processing
     if (normalizedSegmentOpts.startSec != null) opts.startSec = normalizedSegmentOpts.startSec;
     if (normalizedSegmentOpts.endSec != null) opts.endSec = normalizedSegmentOpts.endSec;
@@ -12507,7 +12563,8 @@ async function runSkeletonForAllVideos() {
           const key = `${vid.id}:${videoStartSec.toFixed(1)}:${(videoEndSec ?? 'end')}`;
           if (dedupe.has(key)) continue;
           dedupe.add(key);
-          if (isSkeletonRangeReady(vid.id, videoStartSec, videoEndSec, vid.duration_sec)) {
+          const modeCompatible = isPoseCoverageCompatibleWithCurrentMode(vid.id);
+          if (modeCompatible && isSkeletonRangeReady(vid.id, videoStartSec, videoEndSec, vid.duration_sec)) {
             skipped++;
             continue;
           }
@@ -12517,6 +12574,7 @@ async function runSkeletonForAllVideos() {
             startSec: videoStartSec,
             endSec: videoEndSec,
             segName: seg.name,
+            forceReplaceRange: !modeCompatible,
           });
         }
       }
@@ -12547,7 +12605,12 @@ async function runSkeletonForAllVideos() {
         const badge = el('badge');
         if (badge) badge.textContent = `${done + 1}/${totalJobs}: ${job.filename} (${job.segName})`;
         try {
-          await runSkeletonForVideo(job.fileId, { startSec: job.startSec, endSec: job.endSec, segmentName: job.segName });
+          await runSkeletonForVideo(job.fileId, {
+            startSec: job.startSec,
+            endSec: job.endSec,
+            segmentName: job.segName,
+            forceReplaceRange: job.forceReplaceRange,
+          });
           done++;
         } catch (e) {
           console.warn(`Skeleton failed for ${job.filename} in ${job.segName}:`, e);
@@ -12564,7 +12627,10 @@ async function runSkeletonForAllVideos() {
       // No segments: process all videos at full length (fallback)
       const files = await DB.listFiles(state.projectId);
       const allVideos = files.filter(f => f.kind === 'video' && !f.playback_only);
-      const videos = allVideos.filter(v => !isSkeletonRangeReady(v.id, 0, v.duration_sec, v.duration_sec));
+      const videos = allVideos.filter(v => (
+        !isPoseCoverageCompatibleWithCurrentMode(v.id)
+        || !isSkeletonRangeReady(v.id, 0, v.duration_sec, v.duration_sec)
+      ));
       const skipped = allVideos.length - videos.length;
       if (allVideos.length === 0) { alert('No analyzable video files in project.'); return; }
       if (videos.length === 0) {
@@ -12587,10 +12653,7 @@ async function runSkeletonForAllVideos() {
           }, {
             fps,
             model,
-            poseInputMaxDim: getPoseInputMaxDim(),
-            exactSegmentSeek: isPoseExactSegmentSeekEnabled(),
-            enableBoomPrediction: areBoomPredictionsEnabled(),
-            enableRudderPrediction: areRudderPredictionsEnabled(),
+            ...getPoseProcessingOptions(),
             ...getPoseAthleteOptionsForVideo(v),
           });
           // Kick queue render again after starting the async job so polling always arms.
@@ -12644,7 +12707,7 @@ async function reprocessSegment(seg) {
   for (const { vid, videoStartSec, videoEndSec } of overlapping) {
     console.log(`[Segment] processing ${vid.filename}: video_s ${videoStartSec.toFixed(1)} - ${videoEndSec?.toFixed(1) ?? 'end'}`);
     jobs.push(
-      runSkeletonForVideo(vid.id, { startSec: videoStartSec, endSec: videoEndSec, segmentName: seg.name })
+      runSkeletonForVideo(vid.id, { startSec: videoStartSec, endSec: videoEndSec, segmentName: seg.name, forceReplaceRange: true })
         .catch(e => {
           console.warn(`Skeleton failed for ${vid.filename} in segment "${seg.name}":`, e);
           throw e;
@@ -14248,6 +14311,10 @@ function applyAdvancedModeVisibility() {
   if (featureBoomPredictionsToggle) featureBoomPredictionsToggle.checked = areBoomPredictionsEnabled();
   const featureRudderPredictionsToggle = el('feature-rudder-predictions-toggle');
   if (featureRudderPredictionsToggle) featureRudderPredictionsToggle.checked = areRudderPredictionsEnabled();
+  const poseModeSelect = el('pose-mode-select');
+  if (poseModeSelect) poseModeSelect.value = getPoseMode();
+  const poseMinConfidenceInput = el('pose-2d-threshold-input');
+  if (poseMinConfidenceInput) poseMinConfidenceInput.value = String(getPoseMinConfidence());
   const poseInputSizeSelect = el('pose-input-size-select');
   if (poseInputSizeSelect) poseInputSizeSelect.value = String(getPoseInputMaxDim());
   const poseExactSegmentSeekToggle = el('pose-exact-segment-seek-toggle');
@@ -14740,7 +14807,7 @@ async function registerServiceWorker() {
   }
   try {
     const registration = await navigator.serviceWorker.register(
-      new URL('./sw.js?v=20260527detail1', import.meta.url).toString(),
+      new URL('./sw.js?v=20260611pose2d1', import.meta.url).toString(),
       { updateViaCache: 'none' },
     );
     registration.update().catch(() => {});
@@ -14838,6 +14905,10 @@ async function init() {
   // Workers
   const workersIn = el('workers-input');
   if(workersIn) workersIn.addEventListener('change',e=>{ state.mediapipeWorkers=parseInt(e.target.value)||2; });
+  const poseModeSelect = el('pose-mode-select');
+  if (poseModeSelect) poseModeSelect.addEventListener('change', e => setPoseMode(e.target.value));
+  const poseMinConfidenceInput = el('pose-2d-threshold-input');
+  if (poseMinConfidenceInput) poseMinConfidenceInput.addEventListener('change', e => setPoseMinConfidence(e.target.value));
   const poseInputSizeSelect = el('pose-input-size-select');
   if (poseInputSizeSelect) poseInputSizeSelect.addEventListener('change', e => setPoseInputMaxDim(e.target.value));
   const poseExactSegmentSeekToggle = el('pose-exact-segment-seek-toggle');
@@ -17979,8 +18050,3 @@ async function openStlViewer() {
 
 // ── Boot ───────────────────────────────────────────────────────────────
 init();
-
-
-
-
-

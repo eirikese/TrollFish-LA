@@ -1535,6 +1535,15 @@
                 <option value="heavy">Heavy (max accuracy)</option>
               </select>
             </label>
+            <label style="font-size:13px;color:var(--muted);display:flex;align-items:center;gap:4px;" title="3D pose keeps the existing boat-space skeleton pipeline. 2D pose estimates trunk angle directly from MediaPipe image landmarks.">Pose mode:
+              <select id="pose-mode-select" style="background:var(--surface2);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:3px 6px;font-size:13px;">
+                <option value="3d" selected>3D pose</option>
+                <option value="2d">2D pose</option>
+              </select>
+            </label>
+            <label style="font-size:13px;color:var(--muted);display:flex;align-items:center;gap:4px;" title="Minimum MediaPipe trunk landmark certainty for accepting 2D pose trunk angle detections.">2D certainty:
+              <input type="number" id="pose-2d-threshold-input" min="0" max="1" value="0.8" step="0.05" style="width:62px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:3px 6px;font-size:13px;" />
+            </label>
             <label style="font-size:13px;color:var(--muted);display:flex;align-items:center;gap:4px;" title="Maximum frame size sent into MediaPipe. Lower is faster; 480 keeps the previous behavior.">Pose size:
               <select id="pose-input-size-select" style="background:var(--surface2);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:3px 6px;font-size:13px;">
                 <option value="360">360 fast</option>
@@ -1671,7 +1680,7 @@
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
 <script type="module">
-  const appVersion = '20260604pose2';
+  const appVersion = '20260611pose2d1';
   const sameFolderApp = `./app.js?v=${appVersion}`;
   const fastApiApp = `/static/app.js?v=${appVersion}`;
   const isLocalDev = ['localhost', '127.0.0.1'].includes(window.location.hostname);

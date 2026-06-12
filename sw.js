@@ -1,8 +1,8 @@
-const CACHE_NAME = 'trollfish-static-v20260526-cont4';
+const CACHE_NAME = 'trollfish-static-v20260611-pose2d1';
 const PRECACHE_URLS = [
   './index.html',
   './manifest.webmanifest',
-  './app.js?v=20260526cont4',
+  './app.js?v=20260611pose2d1',
   './icons/icon-192.svg',
   './icons/icon-512.svg',
 ];

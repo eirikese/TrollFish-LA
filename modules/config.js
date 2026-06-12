@@ -18,6 +18,8 @@ export const MAX_PLAUSIBLE_SPEED_MS = 25.0;
 /** Default camera parameters from ProjectCvConfig */
 export const DEFAULT_CV_CONFIG = Object.freeze({
   pose_model: 'full',
+  pose_mode: '3d',
+  pose_min_confidence: 0.8,
   camera_position: [-3.194, 0.02, 0.585],
   camera_pitch_deg: 14.7,
   camera_yaw_deg: 0.0,

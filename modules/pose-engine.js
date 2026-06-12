@@ -176,6 +176,55 @@ export async function detectLive(source, timestampMs, model = 'lite') {
   return { normLm: result.landmarks[0], worldLm: result.worldLandmarks[0] };
 }
 
+function _normalizePoseMode(value) {
+  return String(value || '').toLowerCase() === '2d' ? '2d' : '3d';
+}
+
+function _normalizePoseMinConfidence(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return 0.8;
+  return Math.max(0, Math.min(1, num));
+}
+
+function _landmarkCertainty(lm) {
+  if (!lm) return 0;
+  const scores = [];
+  const visibility = Number(lm.visibility);
+  const presence = Number(lm.presence);
+  if (Number.isFinite(visibility)) scores.push(visibility);
+  if (Number.isFinite(presence)) scores.push(presence);
+  return scores.length ? Math.max(0, Math.min(1, Math.min(...scores))) : 1;
+}
+
+function _computeTrunkAngle2d(normLm, minConfidence = 0.8) {
+  if (!Array.isArray(normLm)) return { angle: null, confidence: 0 };
+  const required = [11, 12, 23, 24];
+  const points = required.map(idx => normLm[idx]);
+  if (points.some(p => !p || !Number.isFinite(Number(p.x)) || !Number.isFinite(Number(p.y)))) {
+    return { angle: null, confidence: 0 };
+  }
+
+  const confidence = Math.min(...points.map(_landmarkCertainty));
+  if (confidence < minConfidence) return { angle: null, confidence };
+
+  const shoulder = {
+    x: (Number(normLm[11].x) + Number(normLm[12].x)) / 2,
+    y: (Number(normLm[11].y) + Number(normLm[12].y)) / 2,
+  };
+  const hip = {
+    x: (Number(normLm[23].x) + Number(normLm[24].x)) / 2,
+    y: (Number(normLm[23].y) + Number(normLm[24].y)) / 2,
+  };
+  const vx = shoulder.x - hip.x;
+  const vy = shoulder.y - hip.y;
+  const len = Math.hypot(vx, vy);
+  if (!(len > 1e-6)) return { angle: null, confidence };
+
+  // Unsigned trunk lean relative to the image frame vertical.
+  // Upright trunk = 0 deg, trunk flat/horizontal in the image = 90 deg.
+  return { angle: Math.atan2(Math.abs(vx), Math.abs(vy)) * (180 / Math.PI), confidence };
+}
+
 
 // ── Frame extraction ──────────────────────────────────────────────────
 
@@ -855,6 +904,9 @@ export async function processVideo(projectId, fileId, cvConfig = null, onProgres
     ? cvConfig.config
     : cvConfig;
   const cfg = { ...DEFAULT_CV_CONFIG, ...(rawCfg || {}) };
+  const poseMode = _normalizePoseMode(opts?.poseMode ?? cfg.pose_mode);
+  const isPose2dMode = poseMode === '2d';
+  const poseMinConfidence = _normalizePoseMinConfidence(opts?.poseMinConfidence ?? cfg.pose_min_confidence);
   const fileRec = await DB.getFile(fileId);
   const segmentName = typeof opts.segmentName === 'string' ? opts.segmentName.trim() : '';
   const startSec = Number.isFinite(Number(opts.startSec)) ? Math.max(0, Number(opts.startSec)) : null;
@@ -879,7 +931,7 @@ export async function processVideo(projectId, fileId, cvConfig = null, onProgres
   try {
     // 1. Load MediaPipe
     const model = opts.model || 'full';
-    report(`Loading MediaPipe (${model})...`, 0);
+    report(`Loading MediaPipe (${model}, ${poseMode.toUpperCase()})...`, 0);
     const landmarker = await ensurePoseLandmarker(model);
 
     // 2. Load calibration & compute camera pose
@@ -927,7 +979,7 @@ export async function processVideo(projectId, fileId, cvConfig = null, onProgres
 
     // Auto-PnP config — force-disabled when a manual pose is locked in.
     const autoPnpCfg = cfg.auto_camera_pnp || {};
-    const autoPnpEnabled = !manualPoseLocked && autoPnpCfg.enabled !== false;
+    const autoPnpEnabled = !isPose2dMode && !manualPoseLocked && autoPnpCfg.enabled !== false;
     const autoPnpInterval = Math.max(1, Math.round(Number(autoPnpCfg.interval_frames) || 30)); // every N frames
     let autoPnpReady = false;
     let cameraYawDeg = Number(cfg.camera_yaw_deg);
@@ -947,9 +999,9 @@ export async function processVideo(projectId, fileId, cvConfig = null, onProgres
 
     let rudderReady = false;
     let boomReady = false;
-    const rudderPredictionEnabled = opts?.enableRudderPrediction !== false;
-    const boomPredictionEnabled = opts?.enableBoomPrediction !== false;
-    report('Loading angle models...', 0.04);
+    const rudderPredictionEnabled = !isPose2dMode && opts?.enableRudderPrediction !== false;
+    const boomPredictionEnabled = !isPose2dMode && opts?.enableBoomPrediction !== false;
+    report(isPose2dMode ? 'Preparing 2D trunk angle processing...' : 'Loading angle models...', 0.04);
     const [rudderLoadResult, boomLoadResult] = await Promise.all([
       (async () => {
         if (!rudderPredictionEnabled) {
@@ -1046,6 +1098,15 @@ export async function processVideo(projectId, fileId, cvConfig = null, onProgres
     if (!isSegmentRun) {
       try { await Storage.deleteFile(skeletonPath); } catch {}
       try { await Storage.deleteFile(metricsPath); } catch {}
+    } else if (opts?.forceReplaceRange === true) {
+      try {
+        await Promise.all([
+          _filterJsonlOutsideRange(skeletonPath, effectiveStart, effectiveEnd),
+          _filterJsonlOutsideRange(metricsPath, effectiveStart, effectiveEnd),
+        ]);
+      } catch (replaceErr) {
+        console.warn('[Pose] failed to clear existing segment range before reprocess:', replaceErr);
+      }
     }
 
     // ── Auto-PnP pre-pass: calibrate camera before processing ─────────
@@ -1252,14 +1313,24 @@ export async function processVideo(projectId, fileId, cvConfig = null, onProgres
         await Promise.all([rudderPredictionPromise, boomPredictionPromise]);
 
         if (!result.landmarks || result.landmarks.length === 0 ||
-            !result.worldLandmarks || result.worldLandmarks.length === 0) {
+            (!isPose2dMode && (!result.worldLandmarks || result.worldLandmarks.length === 0))) {
           // No pose detected
           await Promise.all([
             skeletonWriter.push(JSON.stringify({
-              frame: frameIdx, ts: ts_s, detected: false,
+              frame: frameIdx, ts: ts_s, detected: false, pose_mode: poseMode,
             })),
             metricsWriter.push(JSON.stringify({
               frame: frameIdx, ts: ts_s, detected: false,
+              pose_mode: poseMode,
+              pose_min_confidence: isPose2dMode ? poseMinConfidence : null,
+              trunk_angle: null,
+              trunk_angle_source: isPose2dMode ? 'mediapipe_2d_image' : null,
+              com_x: null,
+              com_y: null,
+              com_z: null,
+              pitch_moment: null,
+              roll_moment: null,
+              sitting_score: null,
               rudder_angle: rudderPrediction.corrected_angle_deg,
               rudder_angle_raw: rudderPrediction.corrected_angle_raw_deg ?? rudderPrediction.corrected_angle_deg,
               rudder_model_angle: rudderPrediction.model_angle_deg,
@@ -1282,6 +1353,49 @@ export async function processVideo(projectId, fileId, cvConfig = null, onProgres
 
         // Extract landmarks from first person
         const normLm = result.landmarks[0]; // NormalizedLandmark[33]
+        if (isPose2dMode) {
+          const trunk2d = _computeTrunkAngle2d(normLm, poseMinConfidence);
+          const accepted = Number.isFinite(Number(trunk2d.angle));
+          await Promise.all([
+            skeletonWriter.push(JSON.stringify({
+              frame: frameIdx,
+              ts: ts_s,
+              detected: accepted,
+              pose_mode: '2d',
+              pose_confidence: Number.isFinite(Number(trunk2d.confidence)) ? trunk2d.confidence : null,
+            })),
+            metricsWriter.push(JSON.stringify({
+              frame: frameIdx,
+              ts: ts_s,
+              detected: accepted,
+              pose_mode: '2d',
+              pose_confidence: Number.isFinite(Number(trunk2d.confidence)) ? trunk2d.confidence : null,
+              pose_min_confidence: poseMinConfidence,
+              trunk_angle: accepted ? trunk2d.angle : null,
+              trunk_angle_source: 'mediapipe_2d_image',
+              com_x: null,
+              com_y: null,
+              com_z: null,
+              pitch_moment: null,
+              roll_moment: null,
+              sitting_score: null,
+              rudder_angle: null,
+              rudder_angle_raw: null,
+              rudder_model_angle: null,
+              rudder_camera_yaw_deg: null,
+              rudder_angle_system: null,
+              rudder_outlier: false,
+              boom_angle: null,
+              boom_angle_raw: null,
+              boom_model_angle: null,
+              boom_raw_output: null,
+              boom_angle_system: null,
+              boom_outlier: false,
+            })),
+          ]);
+          frameCount++;
+          return;
+        }
         const worldLm = result.worldLandmarks[0]; // Landmark[33]
 
         // Convert to our format: index → [x,y,z]
@@ -1419,16 +1533,19 @@ export async function processVideo(projectId, fileId, cvConfig = null, onProgres
 
     // 8. Update DB with run status
     const existingRun = await DB.getCvRun(projectId, fileId);
+    const existingProcessedRanges = (isSegmentRun && opts?.forceReplaceRange === true)
+      ? _subtractRangeList(existingRun?.processed_ranges || [], effectiveStart, effectiveEnd)
+      : (existingRun?.processed_ranges || []);
     let processedRanges = cancelToken.cancelled
-      ? _normalizeRangeList(existingRun?.processed_ranges || [])
+      ? _normalizeRangeList(existingProcessedRanges)
       : (isSegmentRun
-        ? _normalizeRangeList([...(existingRun?.processed_ranges || []), [effectiveStart, effectiveEnd]])
+        ? _normalizeRangeList([...existingProcessedRanges, [effectiveStart, effectiveEnd]])
         : _normalizeRangeList([[0, videoDuration]]));
     if (!cancelToken.cancelled && isSegmentRun) {
       try {
         const actualCoverage = await getSkeletonCoverage(projectId, fileId);
         const clippedCoverage = _clipRangeList(actualCoverage.map(c => [c.start, c.end]), effectiveStart, effectiveEnd);
-        processedRanges = _normalizeRangeList([...(existingRun?.processed_ranges || []), ...clippedCoverage]);
+        processedRanges = _normalizeRangeList([...existingProcessedRanges, ...clippedCoverage]);
         const coverageRatio = _rangeListCoverageRatio(clippedCoverage, effectiveStart, effectiveEnd, 1.0);
         if (!_rangeListCovers(clippedCoverage, effectiveStart, effectiveEnd, 1.0) && coverageRatio < 0.86) {
           console.warn(
@@ -1444,6 +1561,8 @@ export async function processVideo(projectId, fileId, cvConfig = null, onProgres
       status: cancelToken.cancelled ? 'cancelled' : 'completed',
       frame_count: frameCount,
       fps,
+      pose_mode: poseMode,
+      pose_min_confidence: isPose2dMode ? poseMinConfidence : null,
       duration: videoDuration,
       error_count: errorCount,
       autopnp_updates: autoPnpFrameCount,
