@@ -1482,6 +1482,7 @@ export async function buildReportData(projectId, segmentIds, onProgress = null, 
           lr_hip_y_diffs: [],
           sog_times: [], sog_vals: [], sog_lats: [], sog_lons: [],
           heel_vals: [], heel_time: [],
+          pitch_vals: [], pitch_time: [],
           rudder_vals: [], rudder_time: [],
           boom_vals: [], boom_time: [],
           heading_vals: [], heading_time: [],
@@ -1600,6 +1601,16 @@ export async function buildReportData(projectId, segmentIds, onProgress = null, 
         acc.heel_time.push({ t, v: p.heel });
       }
 
+      const pitchPts = rangeTrackPts.filter(p => p.trim != null || p.pitch != null);
+      for (const p of pitchPts) {
+        const t = toSegmentT(p.video_s);
+        if (!Number.isFinite(t)) continue;
+        const pitch = p.trim != null ? Number(p.trim) : Number(p.pitch);
+        if (!Number.isFinite(pitch)) continue;
+        acc.pitch_vals.push(pitch);
+        acc.pitch_time.push({ t, v: pitch });
+      }
+
       const headingPts = rangeTrackPts.filter(p => p.hdg != null || p.cog != null);
       for (const p of headingPts) {
         const t = toSegmentT(p.video_s);
@@ -1653,6 +1664,7 @@ export async function buildReportData(projectId, segmentIds, onProgress = null, 
       sortTimelineByTInPlace(acc.moment_time);
       sortTimelineByTInPlace(acc.pitch_moment_time);
       sortTimelineByTInPlace(acc.heel_time);
+      sortTimelineByTInPlace(acc.pitch_time);
       sortTimelineByTInPlace(acc.rudder_time);
       sortTimelineByTInPlace(acc.boom_time);
       sortTimelineByTInPlace(acc.heading_time);
@@ -1700,6 +1712,7 @@ export async function buildReportData(projectId, segmentIds, onProgress = null, 
         moment_pitch: stats(acc.moments_pitch, true),
         trunk_angle: stats(acc.trunk_angles),
         heel: stats(acc.heel_vals),
+        pitch: stats(acc.pitch_vals),
         rudder: stats(acc.rudder_vals),
         boom: stats(acc.boom_vals),
         vmg_summary: vmg.summary,
@@ -1723,6 +1736,7 @@ export async function buildReportData(projectId, segmentIds, onProgress = null, 
           timelineMaxPoints
         ),
         heel_timeline: subsampleTimeSeries(acc.heel_time, timelineMaxPoints),
+        pitch_timeline: subsampleTimeSeries(acc.pitch_time, timelineMaxPoints),
         rudder_timeline: subsampleTimeSeries(acc.rudder_time, timelineMaxPoints),
         boom_timeline: subsampleTimeSeries(acc.boom_time, timelineMaxPoints),
         heading_timeline: subsampleTimeSeries(acc.heading_time, timelineMaxPoints),

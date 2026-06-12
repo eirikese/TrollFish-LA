@@ -184,12 +184,12 @@ function looksLikeAppleCaptureFilename(filename) {
 
 function isStoredPlaybackOnlyVideo(file) {
   if (file?.force_analyze) return false;   // user opted this video into analysis (overrides flag + heuristic)
-  if (file?.playback_only) return true;
+  if (file?.external_playback) return true;
   const captureStartTs = normalizeEpochSeconds(file?.capture_start_ts);
   if (captureStartTs == null) return false;
   const source = String(file?.capture_ts_source || '').trim().toLowerCase();
   if (!source || source === 'file_last_modified') return false;
-  return (
+  return !!file?.playback_only && (
     /apple/i.test(String(file?.device_make || '')) ||
     /iphone|ipad|ipod/i.test(String(file?.device_model || '')) ||
     looksLikeAppleCaptureFilename(file?.filename)
@@ -238,6 +238,7 @@ async function maybeRefreshStoredMobileMetadata(fileRec) {
     est_start_ts: captureStartTs,
     capture_ts_source: nextSource || fileRec?.capture_ts_source || null,
     playback_only: nextPlaybackOnly,
+    external_playback: nextPlaybackOnly,
     device_make: appleMeta?.make || null,
     device_model: appleMeta?.model || null,
   };
@@ -456,6 +457,7 @@ async function processVideoFile(projectId, fileRec, onProgress) {
     capture_start_ts: embeddedStartTs,
     capture_ts_source: captureTsSource,
     playback_only: playbackOnly,
+    external_playback: playbackOnly,
     device_make: appleMeta?.make || null,
     device_model: appleMeta?.model || null,
   });
@@ -558,6 +560,13 @@ export async function buildMapData(projectId) {
   if (files.length) {
     files = await Promise.all(files.map(file => maybeRefreshStoredMobileMetadata(file)));
   }
+  for (const file of files) {
+    if (file?.kind !== 'video') continue;
+    if (!file.playback_only || isStoredPlaybackOnlyVideo(file)) continue;
+    await DB.updateFileFields(file.id, { playback_only: false, external_playback: false });
+    file.playback_only = false;
+    file.external_playback = false;
+  }
   const tracks = await DB.listTracks(projectId);
   let matches = await DB.listMatches(projectId);
   const playbackOnlyIds = new Set(
@@ -585,13 +594,7 @@ export async function buildMapData(projectId) {
   const finalMatchedVideoIds = new Set(matches.map(m => m.video_file_id));
   const finalUnmatchedVideoIds = [...videoFileIdsWithGps].filter(id => !finalMatchedVideoIds.has(id));
   if (finalUnmatchedVideoIds.length > 0) {
-    for (const id of finalUnmatchedVideoIds) {
-      const fileToPatch = files.find(f => f.id === id);
-      if (fileToPatch?.force_analyze) continue;   // user explicitly claimed this video for analysis
-      await DB.updateFileFields(id, { playback_only: true });
-      playbackOnlyIds.add(String(id));
-      if (fileToPatch) fileToPatch.playback_only = true;
-    }
+    console.log(`[Pipeline] ${finalUnmatchedVideoIds.length} video(s) have no CSV match yet; keeping them on the timeline without CSV overlay`);
   }
 
   // Build best-match lookup: video_file_id → best csv_file_id
@@ -733,6 +736,7 @@ export async function buildMapData(projectId) {
       telemetry_points: telemetryPoints,
       duration_sec: dur,
       playback_only: playbackOnly,
+      external_playback: !!file?.external_playback,
       capture_ts_source: file?.capture_ts_source || null,
       capture_start_ts: normalizeEpochSeconds(file?.capture_start_ts),
       device_make: file?.device_make || null,
@@ -772,6 +776,7 @@ export async function buildMapData(projectId) {
       duration_sec: dur,
       has_gps: false,
       playback_only: playbackOnly,
+      external_playback: !!file.external_playback,
       capture_ts_source: file.capture_ts_source || null,
       capture_start_ts: normalizeEpochSeconds(file.capture_start_ts),
       device_make: file.device_make || null,

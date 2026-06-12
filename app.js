@@ -2,11 +2,11 @@
 /* ── Browser-side modules (IndexedDB, GPS parsing, matching) ──── */
 import * as DB from './modules/db.js';
 import * as FM from './modules/file-manager.js';
-import * as Pipeline from './modules/pipeline.js?v=20260604pose2';
+import * as Pipeline from './modules/pipeline.js?v=20260612csvmap1';
 import * as PoseEngine from './modules/pose-engine.js?v=20260611pose2d1';
 import * as Storage from './modules/storage.js';
 import { matchVideoTracksToCsv } from './modules/matcher.js?v=20260527detail1';
-import { buildReportData, generateDensityGrid } from './modules/report-builder.js?v=20260604pose2';
+import { buildReportData, generateDensityGrid } from './modules/report-builder.js?v=20260612segstats2';
 import { generatePdf, renderKdeHistogram } from './modules/report-pdf.js?v=20260527detail1';
 import {
   DEFAULT_MANEUVER_DETECTION_SETTINGS,
@@ -102,7 +102,10 @@ const state = {
     expandedOverlayType: null,
     expandedOverlayKey: null,
     previousVideoLayout: null,
+    hoverSegmentId: null,
+    widthPx: null,
   },
+  inlineHeatmapMenuVisibility: {},
   reportOptions: {
     summaryStats: true,
     histograms: true,
@@ -200,6 +203,8 @@ const POSE_MODE_KEY = 'trollfish_poseMode_v1';
 const POSE_MIN_CONFIDENCE_KEY = 'trollfish_poseMinConfidence_v1';
 const POSE_INPUT_MAX_DIM_KEY = 'trollfish_poseInputMaxDim_v1';
 const POSE_EXACT_SEGMENT_SEEK_KEY = 'trollfish_poseExactSegmentSeek_v1';
+const INLINE_HEATMAP_MENU_VISIBILITY_KEY = 'trollfish_inlineHeatmapMenuVisibility_v1';
+const INLINE_HEATMAP_PANEL_WIDTH_KEY = 'trollfish_inlineHeatmapPanelWidth_v1';
 const API_CSV_CONFIG_KEY = 'trollfish_apiCsvConfig_v1';
 const REPORT_OPTIONS_KEY = 'trollfish_reportOptions_v1';
 const REPORT_HISTORY_KEY_PREFIX = 'trollfish_reportHistory_';
@@ -215,6 +220,37 @@ const DEFAULT_ADVANCED_FEATURES = Object.freeze({
   boomPredictions: true,
   rudderPredictions: true,
 });
+const DEFAULT_INLINE_HEATMAP_MENU_VISIBILITY = Object.freeze({
+  keypoint: false,
+  com: false,
+  stats: true,
+  summary_sog: true,
+  summary_twa: false,
+  summary_heel: true,
+  summary_pitch: true,
+  summary_moment_roll: false,
+  summary_trunk_angle: true,
+  summary_rudder: false,
+  summary_boom: false,
+  plot_trunk: false,
+  plot_rudder: false,
+  plot_boom: false,
+  plot_roll: false,
+  plot_heel: false,
+  plot_sog: false,
+});
+const TIMELINE_STAT_HEATMAP_VISIBILITY_KEYS = Object.freeze({
+  sog: ['summary_sog'],
+  twa: ['summary_twa'],
+  heel: ['summary_heel'],
+  pitch: ['summary_pitch'],
+  roll: ['summary_moment_roll', 'plot_roll'],
+  trunk: ['summary_trunk_angle'],
+  rudder: ['summary_rudder', 'plot_rudder'],
+  boom: ['summary_boom', 'plot_boom'],
+});
+const INLINE_HEATMAP_PANEL_MIN_WIDTH = 220;
+const INLINE_HEATMAP_PANEL_MAX_WIDTH = 720;
 const IS_IPAD = (() => {
   if (typeof navigator === 'undefined') return false;
   const ua = navigator.userAgent || '';
@@ -232,8 +268,8 @@ const _timelineProcessedMetricCache = new Map(); // `${projectId}:${fileId}` -> 
 let _timelineMetricLoadToken = 0;
 const TIMELINE_METRIC_LOAD_ABORTED = 'timeline_metric_load_aborted';
 const TIMELINE_PROCESSED_STATS_REFRESH_MS = 90;
-// Timeline stat readouts refresh at 1 Hz and show the mean of the trailing second.
-const TIMELINE_STATS_UI_REFRESH_MS = 1000;
+// Timeline stat readouts refresh at 3 Hz and show the mean of the trailing second.
+const TIMELINE_STATS_UI_REFRESH_MS = 1000 / 3;
 const TIMELINE_STATS_MEAN_WINDOW_SEC = 1;
 // During playback the timeline advances every animation frame (~60fps) for smooth
 // video, but the secondary timeline UI (markers, SOG canvas, labels, layout, stats)
@@ -423,6 +459,103 @@ function setPoseExactSegmentSeek(enabled) {
   saveJsonLocal(POSE_EXACT_SEGMENT_SEEK_KEY, state.poseExactSegmentSeek);
   const exactToggle = el('pose-exact-segment-seek-toggle');
   if (exactToggle) exactToggle.checked = !!state.poseExactSegmentSeek;
+}
+
+function normalizeInlineHeatmapMenuVisibility(value = {}) {
+  const input = value && typeof value === 'object' ? value : {};
+  const out = { ...DEFAULT_INLINE_HEATMAP_MENU_VISIBILITY };
+  for (const key of Object.keys(out)) {
+    if (input[key] != null) out[key] = !!input[key];
+  }
+  return out;
+}
+
+function syncInlineHeatmapMenuVisibilityInputs() {
+  const visibility = normalizeInlineHeatmapMenuVisibility(state.inlineHeatmapMenuVisibility);
+  state.inlineHeatmapMenuVisibility = visibility;
+  document.querySelectorAll('[data-inline-heatmap-toggle]').forEach(input => {
+    const key = input.getAttribute('data-inline-heatmap-toggle');
+    if (!key || !(key in DEFAULT_INLINE_HEATMAP_MENU_VISIBILITY)) return;
+    input.checked = visibility[key] !== false;
+  });
+}
+
+function loadInlineHeatmapMenuVisibilitySetting() {
+  state.inlineHeatmapMenuVisibility = normalizeInlineHeatmapMenuVisibility(
+    loadJsonLocal(INLINE_HEATMAP_MENU_VISIBILITY_KEY, DEFAULT_INLINE_HEATMAP_MENU_VISIBILITY),
+  );
+  syncInlineHeatmapMenuVisibilityInputs();
+}
+
+function saveInlineHeatmapMenuVisibilitySetting() {
+  state.inlineHeatmapMenuVisibility = normalizeInlineHeatmapMenuVisibility(state.inlineHeatmapMenuVisibility);
+  saveJsonLocal(INLINE_HEATMAP_MENU_VISIBILITY_KEY, state.inlineHeatmapMenuVisibility);
+}
+
+function clampInlineHeatmapPanelWidth(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return null;
+  const workspace = el('map-workspace');
+  const dividerW = el('inline-heatmap-divider')?.offsetWidth || 0;
+  const available = workspace?.clientWidth
+    ? Math.max(INLINE_HEATMAP_PANEL_MIN_WIDTH, workspace.clientWidth - dividerW - 140)
+    : INLINE_HEATMAP_PANEL_MAX_WIDTH;
+  const maxW = Math.max(INLINE_HEATMAP_PANEL_MIN_WIDTH, Math.min(INLINE_HEATMAP_PANEL_MAX_WIDTH, available));
+  return Math.max(INLINE_HEATMAP_PANEL_MIN_WIDTH, Math.min(maxW, Math.round(num)));
+}
+
+function applyInlineHeatmapPanelWidth(widthPx, persist = false) {
+  const clamped = clampInlineHeatmapPanelWidth(widthPx);
+  if (!Number.isFinite(clamped)) return null;
+  state.inlineHeatmaps.widthPx = clamped;
+  el('layout')?.style.setProperty('--inline-heatmap-width', `${clamped}px`);
+  if (persist) {
+    try { localStorage.setItem(INLINE_HEATMAP_PANEL_WIDTH_KEY, String(clamped)); } catch {}
+  }
+  return clamped;
+}
+
+function loadInlineHeatmapPanelWidthSetting() {
+  let saved = null;
+  try { saved = localStorage.getItem(INLINE_HEATMAP_PANEL_WIDTH_KEY); } catch {}
+  if (saved != null && saved !== '') applyInlineHeatmapPanelWidth(Number(saved), false);
+}
+
+function isInlineHeatmapMenuItemVisible(key) {
+  const visibility = normalizeInlineHeatmapMenuVisibility(state.inlineHeatmapMenuVisibility);
+  return visibility[key] !== false;
+}
+
+function isTimelineStatVisibleByHeatmapMenu(metricKey) {
+  const linkedKeys = TIMELINE_STAT_HEATMAP_VISIBILITY_KEYS[metricKey];
+  if (!Array.isArray(linkedKeys) || linkedKeys.length === 0) return true;
+  if (!isInlineHeatmapMenuItemVisible('stats')) return false;
+  return linkedKeys.every(key => isInlineHeatmapMenuItemVisible(key));
+}
+
+function getVisibleTimelineStatDefs() {
+  return TIMELINE_STAT_DEFS.filter(def => isTimelineStatVisibleByHeatmapMenu(def.key));
+}
+
+function refreshInlineHeatmapsForMenuVisibilityChange() {
+  syncTimelineOverlayMetricSelectionAcrossSlots();
+  populateTimelineStats();
+  if (!state.inlineHeatmaps?.visible) return;
+  closeInlineHeatmapPlotOverlay();
+  state.inlineHeatmaps.renderedSegmentId = null;
+  state.inlineHeatmaps.renderedLoadToken = 0;
+  syncInlineHeatmapsToCurrentSegment();
+}
+
+function setInlineHeatmapMenuItemVisible(key, visible) {
+  if (!key || !(key in DEFAULT_INLINE_HEATMAP_MENU_VISIBILITY)) return;
+  state.inlineHeatmapMenuVisibility = normalizeInlineHeatmapMenuVisibility({
+    ...(state.inlineHeatmapMenuVisibility || {}),
+    [key]: !!visible,
+  });
+  saveInlineHeatmapMenuVisibilitySetting();
+  syncInlineHeatmapMenuVisibilityInputs();
+  refreshInlineHeatmapsForMenuVisibilityChange();
 }
 
 function syncManeuverDetectionInputs() {
@@ -2422,7 +2555,16 @@ function normalizeAthleteId(id) {
 }
 
 function isPlaybackOnlyVideo(video) {
-  return !!video?.playback_only;
+  if (!video?.playback_only || video?.force_analyze) return false;
+  if (video?.external_playback) return true;
+  const captureStartTs = Number(video?.capture_start_ts);
+  const source = String(video?.capture_ts_source || '').trim().toLowerCase();
+  if (!Number.isFinite(captureStartTs) || !source || source === 'file_last_modified') return false;
+  return (
+    /apple/i.test(String(video?.device_make || '')) ||
+    /iphone|ipad|ipod/i.test(String(video?.device_model || '')) ||
+    /^(IMG|VID|PXL|MVIMG|IMG_E)_\d{3,}/i.test(String(video?.filename || ''))
+  );
 }
 
 function playbackOnlyVideoTitle(video) {
@@ -6681,7 +6823,32 @@ function isAnalysisViewActive() {
   return !!el('view-analysis')?.classList.contains('active-view');
 }
 
-function updateHeatmapButtonState(seg = (isAnalysisViewActive() ? getSegmentAtTs(state.tl?.currentTs) : null), inAnalysis = isAnalysisViewActive()) {
+function getInlineHeatmapTargetSegment(inAnalysis = isAnalysisViewActive()) {
+  if (!inAnalysis) return null;
+  const hoverId = state.inlineHeatmaps?.hoverSegmentId;
+  const hoverSeg = hoverId != null ? getSegmentById(hoverId) : null;
+  return hoverSeg || getSegmentAtTs(state.tl?.currentTs);
+}
+
+function setInlineHeatmapHoverSegment(segId) {
+  const nextId = segId == null ? null : String(segId);
+  if ((state.inlineHeatmaps?.hoverSegmentId || null) === nextId) return;
+  state.inlineHeatmaps.hoverSegmentId = nextId;
+  const seg = getInlineHeatmapTargetSegment();
+  updateHeatmapButtonState(seg, isAnalysisViewActive());
+  if (state.inlineHeatmaps?.visible) {
+    syncInlineHeatmapsToCurrentSegment(seg, isAnalysisViewActive());
+  }
+}
+
+function clearInlineHeatmapHoverSegment(segId = null) {
+  const current = state.inlineHeatmaps?.hoverSegmentId;
+  if (current == null) return;
+  if (segId != null && String(segId) !== String(current)) return;
+  setInlineHeatmapHoverSegment(null);
+}
+
+function updateHeatmapButtonState(seg = getInlineHeatmapTargetSegment(), inAnalysis = isAnalysisViewActive()) {
   const btn = el('btn-heatmaps');
   if (!btn) return;
   btn.style.display = state.advancedMode ? '' : 'none';
@@ -6689,9 +6856,9 @@ function updateHeatmapButtonState(seg = (isAnalysisViewActive() ? getSegmentAtTs
   btn.disabled = !state.advancedMode || !inAnalysis || (!seg && !state.inlineHeatmaps?.visible);
   btn.title = seg
     ? (state.inlineHeatmaps?.visible
-      ? 'Hide the inline report heatmaps beside the videos'
-      : 'Show the report heatmaps beside each visible video')
-    : 'Move the playhead into a segment to show inline heatmaps';
+      ? 'Hide segment stats beside the map'
+      : 'Show segment stats beside the map')
+    : 'Move the playhead into a segment to show segment stats';
 }
 
 function syncHeatmapViewerToCurrentSegment(seg, inAnalysis = isAnalysisViewActive()) {
@@ -6720,8 +6887,9 @@ function updateCurrentSegmentActions() {
       }
     }
   }
-  updateHeatmapButtonState(seg, inAnalysis);
-  syncHeatmapViewerToCurrentSegment(seg, inAnalysis);
+  const heatmapSeg = getInlineHeatmapTargetSegment(inAnalysis);
+  updateHeatmapButtonState(heatmapSeg, inAnalysis);
+  syncHeatmapViewerToCurrentSegment(heatmapSeg, inAnalysis);
 }
 
 function assignVideoColors() {
@@ -7358,14 +7526,23 @@ async function setFileMeta(fileId, meta) {
 async function setCsvAthleteAndLinkedVideos(csvFileId, athleteId) {
   if (!state.projectId || !csvFileId) return;
   const nextAthleteId = athleteId || null;
-  const updates = [];
   const csvMeta = state.fileMeta?.[csvFileId] || {};
-  updates.push([csvFileId, { ...csvMeta, athlete_id: nextAthleteId }]);
+  await DB.setFileMeta(state.projectId, csvFileId, { ...csvMeta, athlete_id: nextAthleteId });
+  state.fileMeta = await DB.getFileMeta(state.projectId);
 
+  try {
+    await Pipeline.runMatching(state.projectId);
+  } catch (err) {
+    console.warn('[assign] failed to refresh CSV/video matches before linking athletes:', err);
+  }
+  await loadMapData();
+
+  const linkedUpdates = [];
   for (const video of (state.mapData?.videos || [])) {
     if (String(video?.best_match_csv_id || '') !== String(csvFileId)) continue;
     const videoMeta = state.fileMeta?.[video.id] || {};
-    updates.push([
+    if (videoMeta.manual_athlete) continue;
+    linkedUpdates.push([
       video.id,
       {
         ...videoMeta,
@@ -7374,11 +7551,12 @@ async function setCsvAthleteAndLinkedVideos(csvFileId, athleteId) {
       },
     ]);
   }
-
-  for (const [fileId, meta] of updates) {
+  for (const [fileId, meta] of linkedUpdates) {
     await DB.setFileMeta(state.projectId, fileId, meta);
   }
-  state.fileMeta = await DB.getFileMeta(state.projectId);
+  if (linkedUpdates.length) {
+    state.fileMeta = await DB.getFileMeta(state.projectId);
+  }
 
   const csvTrack = (state.mapData?.csvs || []).find(c => String(c.id) === String(csvFileId));
   if (csvTrack && nextAthleteId) {
@@ -7400,7 +7578,11 @@ async function setVideoExternalMode(fileId, { external = false, athleteId = null
   // Claiming a video for analysis (external=false) sets force_analyze so the
   // pipeline's auto re-flag loop and playback-only heuristic leave it analyzable,
   // even with no matching CSV. Marking it External clears the protection.
-  await DB.updateFileFields(fileId, { playback_only: !!external, force_analyze: !external });
+  await DB.updateFileFields(fileId, {
+    playback_only: !!external,
+    external_playback: !!external,
+    force_analyze: !external,
+  });
 
   if (external) {
     nextMeta.athlete_id = null;
@@ -7756,7 +7938,7 @@ function renderMap() {
     // when it has no GPS of its own (getVideoMapPoints then returns no direct pts,
     // so a phone clip without telemetry stays off the map).
     const hasOwnGps = Array.isArray(v.points) && v.points.length >= 2;
-    if (v.playback_only && !hasOwnGps) continue;
+    if (isPlaybackOnlyVideo(v) && !hasOwnGps) continue;
     const pts = getVideoMapPoints(v, csvs);
     if(!pts.length) continue;
     const color = state.videoColors[v.id] || '#1d8fd8';
@@ -7826,6 +8008,8 @@ function renderMap() {
             tlSeekTo(nearest.ts);
           }
         });
+        poly.on('mouseover', () => setInlineHeatmapHoverSegment(seg.id));
+        poly.on('mouseout', () => clearInlineHeatmapHoverSegment(seg.id));
         poly.addTo(segGroup);
         if(segPts.length > bestLen) { bestLen = segPts.length; bestSegPts = segPts; }
       }
@@ -7835,7 +8019,10 @@ function renderMap() {
         const midPt = bestSegPts[midIdx];
         const labelHtml = `<div class="seg-label-icon" style="color:${segColor};">${seg.name}</div>`;
         const icon = L.divIcon({html:labelHtml, className:'', iconSize:null, iconAnchor:[0,26]});
-        L.marker([midPt.lat, midPt.lon], {icon, pane:'splitMarkersPane'}).addTo(segGroup);
+        L.marker([midPt.lat, midPt.lon], {icon, pane:'splitMarkersPane'})
+          .on('mouseover', () => setInlineHeatmapHoverSegment(seg.id))
+          .on('mouseout', () => clearInlineHeatmapHoverSegment(seg.id))
+          .addTo(segGroup);
 
         const startPt = bestSegPts[0];
         const endPt = bestSegPts[bestSegPts.length - 1];
@@ -7846,7 +8033,9 @@ function renderMap() {
           fillColor: '#2ea043',
           fillOpacity: 1,
           pane: 'splitMarkersPane',
-        }).addTo(segGroup);
+        }).on('mouseover', () => setInlineHeatmapHoverSegment(seg.id))
+          .on('mouseout', () => clearInlineHeatmapHoverSegment(seg.id))
+          .addTo(segGroup);
         L.circleMarker([endPt.lat, endPt.lon], {
           radius: 7,
           color: '#ffffff',
@@ -7854,7 +8043,9 @@ function renderMap() {
           fillColor: '#e3342f',
           fillOpacity: 1,
           pane: 'splitMarkersPane',
-        }).addTo(segGroup);
+        }).on('mouseover', () => setInlineHeatmapHoverSegment(seg.id))
+          .on('mouseout', () => clearInlineHeatmapHoverSegment(seg.id))
+          .addTo(segGroup);
       }
     }
     segGroup.addTo(state.map);
@@ -7994,7 +8185,7 @@ function syncTimelineSlotOverlayMetricPrefs(slot) {
 }
 
 function getUnifiedTimelineOverlayMetricSet(slots = state.tl?.athleteSlots || []) {
-  const validKeys = new Set(TIMELINE_STAT_DEFS.map(def => def.key));
+  const validKeys = new Set(getVisibleTimelineStatDefs().map(def => def.key));
   const selected = new Set();
   for (const slot of slots) {
     const metricSet = slot?._selectedTimelineMetrics instanceof Set
@@ -8008,7 +8199,7 @@ function getUnifiedTimelineOverlayMetricSet(slots = state.tl?.athleteSlots || []
 }
 
 function applyUnifiedTimelineOverlayMetricSet(metricKeys, slots = state.tl?.athleteSlots || []) {
-  const validKeys = new Set(TIMELINE_STAT_DEFS.map(def => def.key));
+  const validKeys = new Set(getVisibleTimelineStatDefs().map(def => def.key));
   const normalized = new Set();
   for (const key of metricKeys || []) {
     if (validKeys.has(key)) normalized.add(key);
@@ -8522,11 +8713,11 @@ function tsFallsInCsvGpsGap(ts, csvPts, gapThreshold = null, alreadySorted = fal
   const prev = pts[lo - 1];
   if (!prev && next) {
     const edgeGap = Number(next.ts) - t;
-    return edgeGap > threshold && edgeGap <= 120;
+    return edgeGap > threshold;
   }
   if (prev && !next) {
     const edgeGap = t - Number(prev.ts);
-    return edgeGap > threshold && edgeGap <= 120;
+    return edgeGap > threshold;
   }
   if (!prev || !next) return false;
   const gap = Number(next.ts) - Number(prev.ts);
@@ -8550,11 +8741,11 @@ function mergeCsvMetricWithVideoGpsGaps(csvMetricPts, csvGpsPts, videoPts, mappe
   const metricSorted = sortedTelemetryPoints(csvMetricPts);
   if (metricSorted.length < 2 && Array.isArray(videoPts) && videoPts.length) {
     const fallbackAll = videoPts.map(mapper).filter(Boolean);
-    return metricSorted.length ? metricSorted : fallbackAll;
+    return sortedTelemetryPoints([...metricSorted, ...fallbackAll]);
   }
   const fallback = collectVideoGapFallbackPoints(metricSorted, videoPts, mapper);
   if (!fallback.length) return csvMetricPts;
-  return [...metricSorted, ...fallback];
+  return sortedTelemetryPoints([...metricSorted, ...fallback]);
 }
 
 function pointMetricValue(point, metricKey) {
@@ -8627,12 +8818,17 @@ function collectSogForAthlete(athId, avids, extraCsvTracks = []) {
       }
     }
   }
-  if (csvPts.length) return finalizeSogPoints(csvPts);
-  if (videoPts.length) return finalizeSogPoints(videoPts);
-
-  const derived = [];
-  for (const v of avids) derived.push(...buildDerivedSogFromGps(getTrackTelemetryPoints(v)));
-  return finalizeSogPoints(derived);
+  const videoSogPts = videoPts.length ? videoPts : [];
+  if (!videoSogPts.length) {
+    for (const v of avids) videoSogPts.push(...buildDerivedSogFromGps(getTrackTelemetryPoints(v)));
+  }
+  if (csvPts.length) {
+    return finalizeSogPoints(mergeCsvMetricWithVideoGpsGaps(csvPts, csvGpsPts, videoSogPts, p => {
+      const sog = Number(p?.sog);
+      return Number.isFinite(sog) && p?.ts != null ? { ts: Number(p.ts), sog, source: 'gopro_gap' } : null;
+    }));
+  }
+  return finalizeSogPoints(videoSogPts);
 }
 
 function collectSogForVideo(v) {
@@ -8654,9 +8850,14 @@ function collectSogForVideo(v) {
   for (const p of getTrackTelemetryPoints(v)) {
     if (p.ts != null && p.sog != null) videoPts.push({ ts: p.ts, sog: p.sog });
   }
-  if (csvPts.length) return finalizeSogPoints(csvPts);
-  if (videoPts.length) return finalizeSogPoints(videoPts);
-  return finalizeSogPoints(buildDerivedSogFromGps(getTrackTelemetryPoints(v)));
+  const videoSogPts = videoPts.length ? videoPts : buildDerivedSogFromGps(getTrackTelemetryPoints(v));
+  if (csvPts.length) {
+    return finalizeSogPoints(mergeCsvMetricWithVideoGpsGaps(csvPts, csvGpsPts, videoSogPts, p => {
+      const sog = Number(p?.sog);
+      return Number.isFinite(sog) && p?.ts != null ? { ts: Number(p.ts), sog, source: 'gopro_gap' } : null;
+    }));
+  }
+  return finalizeSogPoints(videoSogPts);
 }
 
 function collectSogForCsvTracks(csvTracks) {
@@ -8702,7 +8903,7 @@ function collectTrackMetricForAthlete(avids, metricKey, extraCsvTracks = []) {
     }
   }
 
-  if (csvPts.length && (metricKey === 'cog' || metricKey === 'hdg')) {
+  if (csvPts.length) {
     return mergeCsvMetricWithVideoGpsGaps(csvPts, csvGpsPts, videoPts, p => {
       const value = pointMetricValue(p, metricKey);
       return value != null ? { ts: Number(p.ts), [metricKey]: value, source: 'gopro_gap' } : null;
@@ -8750,7 +8951,7 @@ function collectTrackMetricForVideo(video, metricKey) {
     }
   }
 
-  if (csvPts.length && (metricKey === 'cog' || metricKey === 'hdg')) {
+  if (csvPts.length) {
     return mergeCsvMetricWithVideoGpsGaps(csvPts, csvGpsPts, videoPts, p => {
       const value = pointMetricValue(p, metricKey);
       return value != null ? { ts: Number(p.ts), [metricKey]: value, source: 'gopro_gap' } : null;
@@ -9265,7 +9466,7 @@ function computeSeriesInstantValue(series, centerTs, maxGapSec = TIMELINE_INSTAN
 }
 
 // Mean of the trailing `windowSec` seconds ending at `centerTs` — used for the
-// 1 Hz timeline stat readouts so the numbers reflect the last second rather than
+// 3 Hz timeline stat readouts so the numbers reflect the last second rather than
 // a single instantaneous (and jumpy) sample. Falls back to the nearest sample
 // when the window has no coverage (e.g. at the very start of a track).
 function computeSeriesTrailingMean(series, centerTs, windowSec = TIMELINE_STATS_MEAN_WINDOW_SEC) {
@@ -9462,7 +9663,7 @@ function buildTimelineOverlayGraphData(selectedMetrics, slots, currentTs, window
   const endTs = ts + spanSec / 2;
   const metrics = {};
 
-  for (const def of TIMELINE_STAT_DEFS) {
+  for (const def of getVisibleTimelineStatDefs()) {
     if (!selectedMetrics.has(def.key)) continue;
 
     const seriesList = [];
@@ -9711,7 +9912,7 @@ function renderTimelineMetricSharedPanel(selected, slots) {
   panel.appendChild(head);
 
   let visibleCount = 0;
-  for (const def of TIMELINE_STAT_DEFS) {
+  for (const def of getVisibleTimelineStatDefs()) {
     const metricData = graphData.metrics?.[def.key];
     if (!selected.has(def.key) || !metricData) continue;
     const graph = document.createElement('div');
@@ -9778,7 +9979,7 @@ function updateSlotMetricOverlay(slot) {
     if (layout?.gap != null) wrap.style.gap = `${layout.gap}px`;
     else wrap.style.gap = '';
     let visibleCount = 0;
-    for (const def of TIMELINE_STAT_DEFS) {
+    for (const def of getVisibleTimelineStatDefs()) {
       const metricData = graphData?.metrics?.[def.key];
       const item = slot._metricOverlayGraphs[def.key];
       if (!selected.has(def.key) || !metricData || (allowed && !allowed.has(def.key))) {
@@ -9812,7 +10013,7 @@ function updateSlotMetricOverlay(slot) {
   }
 
   let visibleCount = 0;
-  for (const def of TIMELINE_STAT_DEFS) {
+  for (const def of getVisibleTimelineStatDefs()) {
     const item = slot._metricOverlayItems[def.key];
     if (!selected.has(def.key)) {
       if (item?.root) item.root.style.display = 'none';
@@ -9895,7 +10096,7 @@ function populateTimelineStats() {
     };
   }
 
-  for (const def of TIMELINE_STAT_DEFS) {
+  for (const def of getVisibleTimelineStatDefs()) {
     const group = document.createElement('div');
     group.className = 'tl-stat-group';
 
@@ -10010,7 +10211,7 @@ function updateTimelineStats(force = false) {
     statValues.vmg = computeLiveTimelineVmg(slot, currentTs, statValues.sog, statValues.twa);
     slot._timelineStatValues = statValues;
 
-    for (const def of TIMELINE_STAT_DEFS) {
+    for (const def of getVisibleTimelineStatDefs()) {
       const metricRef = refs.metrics?.[def.key];
       if (!metricRef) continue;
       const hasSeries = slotHasTimelineMetricSeries(slot, def.key);
@@ -10912,7 +11113,7 @@ function tlPlay() {
   tl.playing = true;
   tl.lastFrameTime = performance.now();
   tl._lastUiRefreshAt = 0;       // force a UI refresh on the first played frame
-  tl._lastStatsUiUpdateAt = 0;   // and a 1 Hz stats refresh right away
+  tl._lastStatsUiUpdateAt = 0;   // and a 3 Hz stats refresh right away
   tl._pendingProcessedMetricRefresh = true;
   _timelineMetricLoadToken++;
   prewarmLikelyVideosAtTs(tl.currentTs);
@@ -12626,7 +12827,7 @@ async function runSkeletonForAllVideos() {
     } else {
       // No segments: process all videos at full length (fallback)
       const files = await DB.listFiles(state.projectId);
-      const allVideos = files.filter(f => f.kind === 'video' && !f.playback_only);
+      const allVideos = files.filter(f => f.kind === 'video' && !isPlaybackOnlyVideo(f));
       const videos = allVideos.filter(v => (
         !isPoseCoverageCompatibleWithCurrentMode(v.id)
         || !isSkeletonRangeReady(v.id, 0, v.duration_sec, v.duration_sec)
@@ -13007,6 +13208,8 @@ function renderSegmentPanel() {
       if(seg.tsStart != null) tlSeekTo(seg.tsStart);
     };
     row.onclick = seekToSegment;
+    row.addEventListener('mouseenter', () => setInlineHeatmapHoverSegment(seg.id));
+    row.addEventListener('mouseleave', () => clearInlineHeatmapHoverSegment(seg.id));
     const nameEl = document.createElement('span');
     nameEl.className = 'seg-name';
     nameEl.textContent = seg.name;
@@ -13108,6 +13311,8 @@ function renderAnalysisTab() {
     const status = statusById.get(String(s.id)) || { key: 'unprocessed', label: 'Unprocessed', detail: 'Not processed', ready: false };
     const row = document.createElement('div');
     row.className = 'an-split';
+    row.addEventListener('mouseenter', () => setInlineHeatmapHoverSegment(s.id));
+    row.addEventListener('mouseleave', () => clearInlineHeatmapHoverSegment(s.id));
     const include = document.createElement('input');
     include.type = 'checkbox';
     include.className = 'an-split-include';
@@ -13534,6 +13739,7 @@ function initStlResize() {
   const handle = el('stl-resize-handle');
   if(!handle) return;
   const left = el('panel-left');
+  const mapWorkspace = el('map-workspace');
   let dragging = false;
   handle.addEventListener('pointerdown', e => {
     dragging = true;
@@ -13541,13 +13747,13 @@ function initStlResize() {
     handle.classList.add('dragging');
   });
   handle.addEventListener('pointermove', e => {
-    if(!dragging) return;
+    if(!dragging || !left || !mapWorkspace) return;
     const rect = left.getBoundingClientRect();
     const controlsH = el('map-controls').getBoundingClientRect().height;
     const total = rect.height - controlsH - handle.offsetHeight;
     const mapH = Math.max(80, Math.min(total - 80, e.clientY - rect.top));
     const stlH = total - mapH;
-    el('map').style.flex = `0 0 ${mapH}px`;
+    mapWorkspace.style.flex = `0 0 ${mapH}px`;
     el('stl-inline').style.flex = `0 0 ${stlH}px`;
     if(state.map) state.map.invalidateSize();
     window.dispatchEvent(new Event('resize'));
@@ -13618,6 +13824,51 @@ function initDivider() {
     if(state.map) state.map.invalidateSize();
     // Keep STL canvas sizing in sync while dragging divider.
     window.dispatchEvent(new Event('resize'));
+  });
+
+  div.addEventListener('pointerup', endDrag);
+  div.addEventListener('pointercancel', endDrag);
+  div.addEventListener('lostpointercapture', endDrag);
+}
+
+function initInlineHeatmapDivider() {
+  const div = el('inline-heatmap-divider');
+  const panel = el('inline-heatmap-panel');
+  if (!div || !panel) return;
+
+  let dragging = false;
+  let activePointerId = null;
+  let startX = 0;
+  let startW = 0;
+
+  const endDrag = () => {
+    if (!dragging) return;
+    dragging = false;
+    activePointerId = null;
+    div.classList.remove('dragging');
+    document.body.style.userSelect = '';
+    if (Number.isFinite(state.inlineHeatmaps?.widthPx)) {
+      applyInlineHeatmapPanelWidth(state.inlineHeatmaps.widthPx, true);
+    }
+  };
+
+  div.addEventListener('pointerdown', e => {
+    if (e.button !== undefined && e.button !== 0) return;
+    dragging = true;
+    activePointerId = e.pointerId;
+    startX = e.clientX;
+    startW = panel.offsetWidth || state.inlineHeatmaps?.widthPx || INLINE_HEATMAP_PANEL_MIN_WIDTH;
+    div.classList.add('dragging');
+    div.setPointerCapture(e.pointerId);
+    document.body.style.userSelect = 'none';
+    e.preventDefault();
+  });
+
+  div.addEventListener('pointermove', e => {
+    if (!dragging || e.pointerId !== activePointerId) return;
+    applyInlineHeatmapPanelWidth(startW - (e.clientX - startX), false);
+    scheduleAnalysisMapResize();
+    e.preventDefault();
   });
 
   div.addEventListener('pointerup', endDrag);
@@ -14319,6 +14570,7 @@ function applyAdvancedModeVisibility() {
   if (poseInputSizeSelect) poseInputSizeSelect.value = String(getPoseInputMaxDim());
   const poseExactSegmentSeekToggle = el('pose-exact-segment-seek-toggle');
   if (poseExactSegmentSeekToggle) poseExactSegmentSeekToggle.checked = isPoseExactSegmentSeekEnabled();
+  syncInlineHeatmapMenuVisibilityInputs();
   const settingsWrap = el('ath-settings-wrap');
   if (settingsWrap) settingsWrap.classList.toggle('open', advanced);
 
@@ -14807,7 +15059,7 @@ async function registerServiceWorker() {
   }
   try {
     const registration = await navigator.serviceWorker.register(
-      new URL('./sw.js?v=20260611pose2d1', import.meta.url).toString(),
+      new URL('./sw.js?v=20260612csvmap1', import.meta.url).toString(),
       { updateViaCache: 'none' },
     );
     registration.update().catch(() => {});
@@ -14820,6 +15072,7 @@ async function init() {
   registerServiceWorker();
   initMap();
   initDivider();
+  initInlineHeatmapDivider();
   initPhonePlaybackDivider();
   initNavigation();
   initKeyboard();
@@ -14836,6 +15089,8 @@ async function init() {
   loadTimelineStatOverlayGraphSetting();
   loadTimelineSogGapStitchingSetting();
   loadPoseProcessingSettings();
+  loadInlineHeatmapMenuVisibilitySetting();
+  loadInlineHeatmapPanelWidthSetting();
   loadApiCsvConfig();
 
   await loadProjects();
@@ -14913,6 +15168,12 @@ async function init() {
   if (poseInputSizeSelect) poseInputSizeSelect.addEventListener('change', e => setPoseInputMaxDim(e.target.value));
   const poseExactSegmentSeekToggle = el('pose-exact-segment-seek-toggle');
   if (poseExactSegmentSeekToggle) poseExactSegmentSeekToggle.addEventListener('change', e => setPoseExactSegmentSeek(e.target.checked));
+  document.querySelectorAll('[data-inline-heatmap-toggle]').forEach(input => {
+    input.addEventListener('change', e => setInlineHeatmapMenuItemVisible(
+      e.target.getAttribute('data-inline-heatmap-toggle'),
+      e.target.checked,
+    ));
+  });
   const tlStatsWindowIn = el('tl-stats-window-input');
   if (tlStatsWindowIn) tlStatsWindowIn.addEventListener('change', e => setTimelineStatsWindowSec(e.target.value));
   const tlStatOverlayToggle = el('tl-stats-overlay-graph-toggle');
@@ -15761,11 +16022,17 @@ function syncInlineHeatmapPanelLayout() {
   layout.classList.toggle('heatmaps-open', visible && activeCols.length > 0);
   const colW = 280;
   const gap = Math.max(0, activeCols.length - 1) * 6;
-  const heatmapWidth = activeCols.length ? Math.min(680, activeCols.length * colW + gap + 10) : 0;
-  const statOpen = layout.classList.contains('stat-panel-open');
-  const statWidth = statOpen ? 300 : 0;
-  layout.style.setProperty('--inline-heatmap-width', `${heatmapWidth}px`);
-  layout.style.setProperty('--side-tools-width', `${heatmapWidth + statWidth}px`);
+  const defaultWidth = activeCols.length
+    ? Math.min(INLINE_HEATMAP_PANEL_MAX_WIDTH, activeCols.length * colW + gap + 10)
+    : INLINE_HEATMAP_PANEL_MIN_WIDTH;
+  if (Number.isFinite(state.inlineHeatmaps?.widthPx)) {
+    applyInlineHeatmapPanelWidth(state.inlineHeatmaps.widthPx, false);
+  } else {
+    const clampedDefault = clampInlineHeatmapPanelWidth(defaultWidth);
+    if (Number.isFinite(clampedDefault)) {
+      layout.style.setProperty('--inline-heatmap-width', `${clampedDefault}px`);
+    }
+  }
   scheduleAnalysisMapResize();
 }
 
@@ -15837,6 +16104,7 @@ function renderInlineHeatmapLoading(seg, msg = 'Preparing report heatmaps...', p
 const INLINE_HEATMAP_SUMMARY_DEFS = Object.freeze([
   { key: 'sog', label: 'Avg SOG', decimals: 1, suffix: ' kt' },
   { key: 'heel', label: 'Avg Heel', decimals: 1, suffix: '\u00B0' },
+  { key: 'pitch', label: 'Avg Pitch', decimals: 1, suffix: '\u00B0' },
   { key: 'moment_roll', label: 'Avg RM', decimals: 0, suffix: ' Nm' },
   { key: 'trunk_angle', label: 'Avg TA', decimals: 1, suffix: '\u00B0' },
   { key: 'rudder', label: 'Avg RA', decimals: 1, suffix: '\u00B0' },
@@ -16130,7 +16398,7 @@ function isInlineHeatmapPlotOverlayOpen() {
 
 function getVisibleInlineHeatmapPlotSeries(plotKey) {
   const def = getInlineHeatmapPlotDef(plotKey);
-  if (!def) return [];
+  if (!def || !isInlineHeatmapMenuItemVisible(`plot_${def.key}`)) return [];
 
   const seg = getSegmentById(state.inlineHeatmaps?.segmentId) || getSegmentAtTs(state.tl?.currentTs);
   const segmentAthletes = getSegmentAthletes(seg);
@@ -16153,7 +16421,7 @@ function getVisibleInlineHeatmapPlotSeries(plotKey) {
 
 function getVisibleInlineHeatmapTileSeries(tileKey) {
   const def = getInlineHeatmapTileDef(tileKey);
-  if (!def) return [];
+  if (!def || !isInlineHeatmapMenuItemVisible(def.key)) return [];
 
   const seg = getSegmentById(state.inlineHeatmaps?.segmentId) || getSegmentAtTs(state.tl?.currentTs);
   const segmentAthletes = getSegmentAthletes(seg);
@@ -16340,7 +16608,7 @@ async function renderInlineHeatmapPlotOverlay() {
 
 function openInlineHeatmapPlotOverlay(plotKey) {
   const def = getInlineHeatmapPlotDef(plotKey);
-  if (!def) return;
+  if (!def || !isInlineHeatmapMenuItemVisible(`plot_${def.key}`)) return;
   state.inlineHeatmaps.expandedOverlayType = 'plot';
   state.inlineHeatmaps.expandedOverlayKey = def.key;
   renderInlineHeatmapPlotOverlay().catch(err => {
@@ -16350,7 +16618,7 @@ function openInlineHeatmapPlotOverlay(plotKey) {
 
 function openInlineHeatmapTileOverlay(tileKey) {
   const def = getInlineHeatmapTileDef(tileKey);
-  if (!def) return;
+  if (!def || !isInlineHeatmapMenuItemVisible(def.key)) return;
   state.inlineHeatmaps.expandedOverlayType = 'heatmap';
   state.inlineHeatmaps.expandedOverlayKey = def.key;
   renderInlineHeatmapPlotOverlay().catch(err => {
@@ -16409,7 +16677,10 @@ function initInlineHeatmapColSync(col) {
 
 function formatInlineHeatmapSummaryValue(statBlock, decimals = 1, suffix = '') {
   const avg = Number(statBlock?.avg);
-  return Number.isFinite(avg) ? `${avg.toFixed(decimals)}${suffix}` : '--';
+  if (!Number.isFinite(avg)) return '--';
+  const std = Number(statBlock?.std);
+  const stdText = Number.isFinite(std) ? std.toFixed(decimals) : '--';
+  return `${avg.toFixed(decimals)}+-${stdText}${suffix}`;
 }
 
 function createInlineHeatmapSectionLabel(text, color = null) {
@@ -16423,7 +16694,9 @@ function createInlineHeatmapSectionLabel(text, color = null) {
 function createInlineHeatmapSummaryGrid(result, color) {
   const grid = document.createElement('div');
   grid.className = 'video-side-stats-grid';
-  for (const def of INLINE_HEATMAP_SUMMARY_DEFS) {
+  const visibleDefs = INLINE_HEATMAP_SUMMARY_DEFS.filter(def => isInlineHeatmapMenuItemVisible(`summary_${def.key}`));
+  if (!visibleDefs.length) return null;
+  for (const def of visibleDefs) {
     const chip = document.createElement('div');
     chip.className = 'video-side-stat-chip';
     chip.style.borderColor = rgbaFromHex(color || '#5cc8ff', 0.16);
@@ -16493,6 +16766,11 @@ function createInlineHeatmapPlotTile(def, values, athleteName, color, plotJobs) 
 }
 
 function buildInlineHeatmapStatsCard(result, color, plotJobs, vmgContext = null) {
+  if (!isInlineHeatmapMenuItemVisible('stats')) return null;
+  const summaryGrid = createInlineHeatmapSummaryGrid(result, color);
+  const visiblePlotDefs = INLINE_HEATMAP_PLOT_DEFS.filter(def => isInlineHeatmapMenuItemVisible(`plot_${def.key}`));
+  if (!summaryGrid && !visiblePlotDefs.length) return null;
+
   const card = document.createElement('section');
   card.className = 'video-side-heatmap video-side-heatmap-stats';
   card.style.borderColor = rgbaFromHex(color || '#5cc8ff', 0.28);
@@ -16504,15 +16782,17 @@ function buildInlineHeatmapStatsCard(result, color, plotJobs, vmgContext = null)
   heading.style.color = color || '#d9e6f2';
   card.appendChild(heading);
 
-  card.appendChild(createInlineHeatmapSummaryGrid(result, color));
+  if (summaryGrid) card.appendChild(summaryGrid);
 
-  const plots = document.createElement('div');
-  plots.className = 'video-side-plots';
-  for (const def of INLINE_HEATMAP_PLOT_DEFS) {
-    const values = getInlineHeatmapPlotValues(def, result);
-    plots.appendChild(createInlineHeatmapPlotTile(def, values, result?.athlete_name, color, plotJobs));
+  if (visiblePlotDefs.length) {
+    const plots = document.createElement('div');
+    plots.className = 'video-side-plots';
+    for (const def of visiblePlotDefs) {
+      const values = getInlineHeatmapPlotValues(def, result);
+      plots.appendChild(createInlineHeatmapPlotTile(def, values, result?.athlete_name, color, plotJobs));
+    }
+    card.appendChild(plots);
   }
-  card.appendChild(plots);
   return card;
 }
 
@@ -16818,13 +17098,37 @@ function renderInlineHeatmapsForResults(seg, results, loadToken) {
 
     const color = resolveHeatmapAthleteColor(result, seg, segmentAthletes);
     slot._heatmapColEl.replaceChildren();
-    slot._heatmapColEl.appendChild(createInlineHeatmapSectionLabel('Heatmaps', color));
-    const kpJob = buildInlineHeatmapTile(slot._heatmapColEl, getInlineHeatmapTileDef('keypoint'), result?.keypoint_heatmap, color);
-    const comJob = buildInlineHeatmapTile(slot._heatmapColEl, getInlineHeatmapTileDef('com'), result?.com_heatmap, color);
+    let heatmapSectionShown = false;
+    const appendHeatmapSectionLabel = () => {
+      if (heatmapSectionShown) return;
+      slot._heatmapColEl.appendChild(createInlineHeatmapSectionLabel('Heatmaps', color));
+      heatmapSectionShown = true;
+    };
+    let kpJob = null;
+    let comJob = null;
+    if (isInlineHeatmapMenuItemVisible('keypoint')) {
+      appendHeatmapSectionLabel();
+      kpJob = buildInlineHeatmapTile(slot._heatmapColEl, getInlineHeatmapTileDef('keypoint'), result?.keypoint_heatmap, color);
+    }
+    if (isInlineHeatmapMenuItemVisible('com')) {
+      appendHeatmapSectionLabel();
+      comJob = buildInlineHeatmapTile(slot._heatmapColEl, getInlineHeatmapTileDef('com'), result?.com_heatmap, color);
+    }
     if (kpJob) heatmapJobs.push(kpJob);
     if (comJob) heatmapJobs.push(comJob);
-    slot._heatmapColEl.appendChild(createInlineHeatmapSectionLabel('Stats', color));
-    slot._heatmapColEl.appendChild(buildInlineHeatmapStatsCard(result, color, plotJobs, null));
+    const statsCard = buildInlineHeatmapStatsCard(result, color, plotJobs, null);
+    if (statsCard) {
+      slot._heatmapColEl.appendChild(createInlineHeatmapSectionLabel('Stats', color));
+      slot._heatmapColEl.appendChild(statsCard);
+    }
+    if (!heatmapSectionShown && !statsCard) {
+      renderInlineHeatmapStateForSlot(
+        slot,
+        slot?.name || 'Heatmaps',
+        'All Analysis heatmap menu items are hidden in Advanced Settings.',
+        color,
+      );
+    }
   }
   queueInlineHeatmapScrollSync();
   if (state.inlineHeatmaps?.expandedOverlayKey) {
@@ -16867,7 +17171,7 @@ function renderInlineHeatmapsForResults(seg, results, loadToken) {
   })();
 }
 
-async function syncInlineHeatmapsToCurrentSegment(seg = (isAnalysisViewActive() ? getSegmentAtTs(state.tl?.currentTs) : null), inAnalysis = isAnalysisViewActive()) {
+async function syncInlineHeatmapsToCurrentSegment(seg = getInlineHeatmapTargetSegment(), inAnalysis = isAnalysisViewActive()) {
   const enabled = !!state.inlineHeatmaps?.visible && !!state.advancedMode && !!inAnalysis;
 
   for (const slot of state.tl?.athleteSlots || []) {
@@ -17489,7 +17793,8 @@ function closeStlViewer() {
   setAdvancedPaneMode(null);
   if (modal) modal.classList.remove('open');
   el('panel-left')?.classList.remove('stl-open');
-  el('map').style.flex = '';
+  const mapWorkspace = el('map-workspace');
+  if (mapWorkspace) mapWorkspace.style.flex = '';
   el('stl-inline').style.flex = '';
   setTimeout(()=>{ if(state.map) state.map.invalidateSize(); }, 60);
 }

@@ -198,9 +198,8 @@
     #layout { display: flex; flex: 1; min-height: 0; overflow: hidden; }
     #panel-left { display: flex; flex-direction: column; width: 58%; min-width: 280px; min-height: 0; flex-shrink: 0; overflow: hidden; }
     #layout.phone-playback-active #panel-left { width: max(280px, calc(58% - var(--phone-playback-width, 0px))); }
-    #layout.stat-panel-open #panel-left,
-    #layout.heatmaps-open #panel-left { width: max(280px, calc(58% - var(--side-tools-width, 0px) - var(--phone-playback-width, 0px))); }
-    #map { flex: 1; min-height: 120px; position: relative; }
+    #map-workspace { display: flex; flex: 1; min-height: 120px; min-width: 0; overflow: hidden; }
+    #map { flex: 1 1 auto; min-width: 140px; min-height: 120px; position: relative; }
 
     /* Map controls */
     #map-controls { background: var(--surface); border-top: 1px solid var(--border); flex-shrink: 0; max-height: min(34vh, 280px); overflow-y: auto; overscroll-behavior: contain; }
@@ -304,12 +303,15 @@
     /* Divider */
     #divider { width: 5px; background: var(--border); cursor: col-resize; flex-shrink: 0; touch-action: none; }
     #divider:hover, #divider.dragging { background: var(--accent); }
+    #inline-heatmap-divider { display: none; width: 5px; background: var(--border); cursor: col-resize; flex-shrink: 0; touch-action: none; }
+    #layout.heatmaps-open #inline-heatmap-divider { display: block; }
+    #inline-heatmap-divider:hover, #inline-heatmap-divider.dragging { background: var(--accent); }
     #timeline-stat-panel { display: none; flex: 0 0 clamp(220px, 20vw, 320px); min-width: 0; min-height: 0; flex-direction: column; gap: 8px; padding: 8px; background: #101820; border-left: 1px solid rgba(255,255,255,.08); border-right: 1px solid rgba(255,255,255,.08); overflow-y: auto; }
     #layout.stat-panel-open #timeline-stat-panel { display: flex; }
     .timeline-stat-panel-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: #8fa1b4; font-size: 10px; font-weight: 800; letter-spacing: .09em; text-transform: uppercase; }
     .timeline-stat-panel-empty { display: flex; align-items: center; justify-content: center; min-height: 90px; border-radius: 10px; background: rgba(255,255,255,.04); color: #8fa1b4; text-align: center; font-size: 12px; line-height: 1.45; padding: 12px; }
     #timeline-stat-panel .video-metric-graph { width: 100%; height: 124px; flex: 0 0 auto; background: rgba(5,9,14,.72); cursor: pointer; pointer-events: auto; }
-    #inline-heatmap-panel { display: none; flex: 0 0 var(--inline-heatmap-width, clamp(220px, 22vw, 340px)); min-width: 0; min-height: 0; gap: 6px; padding: 4px; background: #070b11; border-left: 1px solid rgba(255,255,255,.08); border-right: 1px solid rgba(255,255,255,.08); overflow: hidden; }
+    #inline-heatmap-panel { display: none; flex: 0 0 var(--inline-heatmap-width, clamp(220px, 22vw, 340px)); min-width: 0; min-height: 0; gap: 6px; padding: 4px; background: #070b11; border-left: 1px solid rgba(255,255,255,.08); overflow: hidden; }
     #layout.heatmaps-open #inline-heatmap-panel { display: flex; }
     #inline-heatmap-panel .video-pane-heatmaps { display: flex; flex: 1 1 0; min-width: 0; min-height: 0; flex-direction: column; gap: 6px; overflow-y: auto; padding-right: 1px; }
 
@@ -376,7 +378,7 @@
     .video-side-heatmap-meta { font-size: 10px; line-height: 1.45; color: #8fa1b4; }
     .video-side-heatmap-empty { display: flex; align-items: center; justify-content: center; flex: 1; min-height: 0; padding: 12px; border-radius: 8px; background: rgba(7,11,17,.7); color: #8fa1b4; text-align: center; font-size: 11px; line-height: 1.45; }
     .video-side-section-label { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .12em; color: #8fa1b4; padding: 2px 2px 0; }
-    .video-side-stats-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+    .video-side-stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 120px), 1fr)); gap: 6px; }
     .video-side-stat-chip { display: flex; flex-direction: column; gap: 3px; padding: 7px 8px; border-radius: 8px; border: 1px solid rgba(255,255,255,.10); background: rgba(255,255,255,.03); }
     .video-side-stat-key { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; color: #8fa1b4; }
     .video-side-stat-value { font-size: 14px; font-weight: 700; color: #fff; font-variant-numeric: tabular-nums; }
@@ -501,7 +503,7 @@
     /* STL 3D */
     #stl-inline { display: none; flex-direction: column; flex: 0 0 48%; min-height: 0; overflow: hidden; border-top: 1px solid var(--border); }
     #stl-inline.open { display: flex; }
-    #panel-left.stl-open #map { flex: 1 1 52%; min-height: 120px; }
+    #panel-left.stl-open #map-workspace { flex: 1 1 52%; min-height: 120px; }
     #stl-header { display: flex; align-items: center; padding: 0 12px; height: 34px; background: var(--surface2); border-bottom: 1px solid var(--border); gap: 10px; flex-shrink: 0; }
     #stl-header h2 { font-size: 13px; font-weight: 600; flex: 1; margin: 0; color: var(--muted); letter-spacing: .04em; }
     #stl-layout, #heatmap-layout, #maneuver-layout { flex: 1; display: none; grid-template-columns: 220px 1fr; grid-template-rows: 1fr; min-height: 0; }
@@ -1000,6 +1002,9 @@
       #video-grid.layout-2plus1,
       #video-grid.layout-auto { grid-template-columns: 1fr; grid-template-rows: none; }
       #video-grid.layout-2plus1 .video-pane { grid-column: auto !important; grid-row: auto !important; }
+      #layout.heatmaps-open #map-workspace { flex-direction: column; }
+      #layout.heatmaps-open #inline-heatmap-divider { display: none; }
+      #layout.heatmaps-open #inline-heatmap-panel { flex: 0 0 min(42%, 260px) !important; border-left: none; border-top: 1px solid rgba(255,255,255,.08); }
       #map-controls { max-height: min(40vh, 260px); }
       .tl-media-segment { font-size: 7px; padding: 0 4px; }
       .tl-media-segment-kind { min-width: 18px; padding: 0 2px; }
@@ -1137,7 +1142,7 @@
     <button class="btn danger sm" id="btn-current-seg-delete">Delete</button>
   </div>
   <button class="btn topbar-action" id="btn-stl"><svg class="icon-svg"><use href="#ico-cube"/></svg> Hull 3D</button>
-  <button class="btn topbar-action" id="btn-heatmaps"><svg class="icon-svg"><use href="#ico-activity"/></svg> Heatmaps</button>
+  <button class="btn topbar-action" id="btn-heatmaps"><svg class="icon-svg"><use href="#ico-activity"/></svg> Segment Stats</button>
 
   <!-- Progress circle + queue -->
   <div id="progress-wrap">
@@ -1276,7 +1281,11 @@
   <div id="view-analysis" class="view-panel active-view">
     <div id="layout">
       <div id="panel-left">
-        <div id="map"></div>
+        <div id="map-workspace">
+          <div id="map"></div>
+          <div id="inline-heatmap-divider" aria-hidden="true"></div>
+          <aside id="inline-heatmap-panel" aria-label="Segment stats beside map"></aside>
+        </div>
         <div id="map-controls">
           <div id="map-ctrl-row">
             <!-- Segment creation controls are driven from topbar button; status shown in #seg-status -->
@@ -1381,7 +1390,6 @@
       </div>
 
       <div id="divider"></div>
-      <aside id="inline-heatmap-panel" aria-label="Segment heatmaps beside videos"></aside>
       <aside id="timeline-stat-panel" aria-label="Timeline stat overlay graphs"></aside>
 
       <div id="panel-right">
@@ -1572,6 +1580,40 @@
             </label>
           </div>
         </div>
+        <div class="advanced-settings-group" id="inline-heatmap-menu-settings">
+          <div class="advanced-settings-title">Analysis Segment Stats Menu</div>
+          <div class="advanced-settings-grid">
+            <label class="stl-tog-row" title="Show the keypoint density heatmap in the Analysis heatmaps panel">
+              <span>Keypoint heatmap</span>
+              <span class="stl-tog"><input type="checkbox" data-inline-heatmap-toggle="keypoint" checked><span class="stl-tog-sl"></span></span>
+            </label>
+            <label class="stl-tog-row" title="Show the center-of-mass density heatmap in the Analysis heatmaps panel">
+              <span>COM heatmap</span>
+              <span class="stl-tog"><input type="checkbox" data-inline-heatmap-toggle="com" checked><span class="stl-tog-sl"></span></span>
+            </label>
+            <label class="stl-tog-row" title="Show the stats card in the Analysis heatmaps panel">
+              <span>Stats card</span>
+              <span class="stl-tog"><input type="checkbox" data-inline-heatmap-toggle="stats" checked><span class="stl-tog-sl"></span></span>
+            </label>
+            <label class="stl-tog-row"><span>Avg SOG</span><span class="stl-tog"><input type="checkbox" data-inline-heatmap-toggle="summary_sog" checked><span class="stl-tog-sl"></span></span></label>
+            <label class="stl-tog-row" title="Show TWA in the Analysis live stats bar">
+              <span>TWA live stat</span>
+              <span class="stl-tog"><input type="checkbox" data-inline-heatmap-toggle="summary_twa" checked><span class="stl-tog-sl"></span></span>
+            </label>
+            <label class="stl-tog-row"><span>Avg Heel</span><span class="stl-tog"><input type="checkbox" data-inline-heatmap-toggle="summary_heel" checked><span class="stl-tog-sl"></span></span></label>
+            <label class="stl-tog-row"><span>Avg Pitch</span><span class="stl-tog"><input type="checkbox" data-inline-heatmap-toggle="summary_pitch" checked><span class="stl-tog-sl"></span></span></label>
+            <label class="stl-tog-row"><span>Avg Roll Moment</span><span class="stl-tog"><input type="checkbox" data-inline-heatmap-toggle="summary_moment_roll" checked><span class="stl-tog-sl"></span></span></label>
+            <label class="stl-tog-row"><span>Avg Trunk Angle</span><span class="stl-tog"><input type="checkbox" data-inline-heatmap-toggle="summary_trunk_angle" checked><span class="stl-tog-sl"></span></span></label>
+            <label class="stl-tog-row"><span>Avg Rudder Angle</span><span class="stl-tog"><input type="checkbox" data-inline-heatmap-toggle="summary_rudder" checked><span class="stl-tog-sl"></span></span></label>
+            <label class="stl-tog-row"><span>Avg Boom Angle</span><span class="stl-tog"><input type="checkbox" data-inline-heatmap-toggle="summary_boom" checked><span class="stl-tog-sl"></span></span></label>
+            <label class="stl-tog-row"><span>Trunk plot</span><span class="stl-tog"><input type="checkbox" data-inline-heatmap-toggle="plot_trunk" checked><span class="stl-tog-sl"></span></span></label>
+            <label class="stl-tog-row"><span>Rudder plot</span><span class="stl-tog"><input type="checkbox" data-inline-heatmap-toggle="plot_rudder" checked><span class="stl-tog-sl"></span></span></label>
+            <label class="stl-tog-row"><span>Boom plot</span><span class="stl-tog"><input type="checkbox" data-inline-heatmap-toggle="plot_boom" checked><span class="stl-tog-sl"></span></span></label>
+            <label class="stl-tog-row"><span>Roll moment plot</span><span class="stl-tog"><input type="checkbox" data-inline-heatmap-toggle="plot_roll" checked><span class="stl-tog-sl"></span></span></label>
+            <label class="stl-tog-row"><span>Heel plot</span><span class="stl-tog"><input type="checkbox" data-inline-heatmap-toggle="plot_heel" checked><span class="stl-tog-sl"></span></span></label>
+            <label class="stl-tog-row"><span>SOG plot</span><span class="stl-tog"><input type="checkbox" data-inline-heatmap-toggle="plot_sog" checked><span class="stl-tog-sl"></span></span></label>
+          </div>
+        </div>
         <div class="advanced-settings-group" id="analysis-report-advanced">
           <div class="advanced-settings-title">Advanced Report Outputs</div>
           <label class="stl-tog-row" id="report-opt-polar-row" title="Add athlete polar-plot pages to the PDF report">
@@ -1680,7 +1722,7 @@
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
 <script type="module">
-  const appVersion = '20260611pose2d1';
+  const appVersion = '20260612csvmap1';
   const sameFolderApp = `./app.js?v=${appVersion}`;
   const fastApiApp = `/static/app.js?v=${appVersion}`;
   const isLocalDev = ['localhost', '127.0.0.1'].includes(window.location.hostname);
