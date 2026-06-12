@@ -525,13 +525,18 @@
     #stl-skel-status { font-size: 13px; color: var(--muted); text-align: center; padding: 6px; }
     #stl-skel-status.ok { color: var(--green); }
     .stl-tune-hint { display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; border-radius: 50%; background: var(--border); color: var(--muted); font-size: 10px; cursor: help; }
-    .stl-tune-grid { display: flex; flex-direction: column; gap: 5px; }
-    .stl-tune-row { display: grid; grid-template-columns: 44px 1fr 54px; align-items: center; gap: 6px; font-size: 12px; color: var(--text); }
-    .stl-tune-row span { color: var(--muted); }
-    .stl-tune-range { width: 100%; accent-color: var(--accent); }
-    .stl-tune-row output { font-size: 11px; color: var(--text); text-align: right; font-variant-numeric: tabular-nums; }
-    .stl-tune-actions { display: flex; gap: 4px; margin-top: 8px; flex-wrap: wrap; }
+    .stl-tune-actions { display: flex; gap: 4px; margin-top: 6px; flex-wrap: wrap; }
     .stl-tune-actions .btn { flex: 1; white-space: nowrap; }
+    .stl-calib-result { margin-bottom: 4px; }
+    #calib-editor-modal { z-index: 1750; padding: 24px; background: rgba(6,10,15,.74); align-items: center; justify-content: center; backdrop-filter: blur(4px); }
+    #calib-editor-box { display: flex; flex-direction: column; gap: 10px; max-width: min(96vw, 1100px); max-height: calc(100vh - 48px); background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 16px; }
+    #calib-editor-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+    #calib-editor-title { font-size: 15px; font-weight: 700; color: var(--text); }
+    #calib-editor-sub { font-size: 12px; color: var(--muted); margin-top: 2px; max-width: 720px; }
+    #calib-editor-stage { position: relative; overflow: auto; background: #000; border-radius: 10px; display: flex; align-items: center; justify-content: center; min-height: 0; }
+    #calib-editor-canvas { display: block; max-width: 100%; max-height: calc(100vh - 220px); touch-action: none; cursor: crosshair; }
+    #calib-editor-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    #calib-editor-msg { flex: 1; }
     #heatmap-panel { background: var(--surface); border-right: 1px solid var(--border); display: flex; flex-direction: column; overflow-y: auto; min-height: 0; }
     #heatmap-wrap { min-height: 0; overflow: auto; background: #0f141d; padding: 10px; }
     #heatmap-wrap::-webkit-scrollbar { width: 6px; height: 6px; }
@@ -1299,24 +1304,22 @@
             <aside id="stl-panel">
               <div class="stl-sec"><h3>Camera Presets</h3><div class="stl-cam-grid"><button class="stl-cam-btn" onclick="window.stlSetCamera('default')">Default</button><button class="stl-cam-btn" onclick="window.stlSetCamera('side')">Side</button><button class="stl-cam-btn" onclick="window.stlSetCamera('top')">Top</button><button class="stl-cam-btn" onclick="window.stlSetCamera('front')">Bow</button><button class="stl-cam-btn" onclick="window.stlSetCamera('rear')">Stern</button><button class="stl-cam-btn" onclick="window.stlSetCamera('athlete')">Athlete</button></div></div>
               <div class="stl-sec"><h3>Visibility</h3><label class="stl-tog-row"><span>Hull</span><span class="stl-tog"><input type="checkbox" id="stl-tog-hull" checked><span class="stl-tog-sl"></span></span></label><label class="stl-tog-row"><span>Skeleton</span><span class="stl-tog"><input type="checkbox" id="stl-tog-skel" checked><span class="stl-tog-sl"></span></span></label><label class="stl-tog-row"><span>Joints</span><span class="stl-tog"><input type="checkbox" id="stl-tog-joints" checked><span class="stl-tog-sl"></span></span></label><label class="stl-tog-row"><span>COM</span><span class="stl-tog"><input type="checkbox" id="stl-tog-com" checked><span class="stl-tog-sl"></span></span></label><label class="stl-tog-row"><span>Grid</span><span class="stl-tog"><input type="checkbox" id="stl-tog-grid" checked><span class="stl-tog-sl"></span></span></label></div>
-              <div class="stl-sec" id="stl-tune-sec">
-                <h3>Camera Pose Tuning <span class="stl-tune-hint" title="Manual offset applied on top of the (Auto-PnP) camera pose to fine-tune where athletes land on the boat. Preview updates live; Save + Re-process bakes it into the analysis.">?</span></h3>
-                <div class="stl-tune-grid">
-                  <label class="stl-tune-row"><span>Pitch</span><input type="range" id="tune-pitch" class="stl-tune-range" min="-10" max="10" step="0.1" value="0"><output id="tune-pitch-out">0.0°</output></label>
-                  <label class="stl-tune-row"><span>Yaw</span><input type="range" id="tune-yaw" class="stl-tune-range" min="-10" max="10" step="0.1" value="0"><output id="tune-yaw-out">0.0°</output></label>
-                  <label class="stl-tune-row"><span>Roll</span><input type="range" id="tune-roll" class="stl-tune-range" min="-10" max="10" step="0.1" value="0"><output id="tune-roll-out">0.0°</output></label>
-                  <label class="stl-tune-row"><span>X fwd</span><input type="range" id="tune-x" class="stl-tune-range" min="-0.5" max="0.5" step="0.01" value="0"><output id="tune-x-out">0.00 m</output></label>
-                  <label class="stl-tune-row"><span>Y lat</span><input type="range" id="tune-y" class="stl-tune-range" min="-0.5" max="0.5" step="0.01" value="0"><output id="tune-y-out">0.00 m</output></label>
-                  <label class="stl-tune-row"><span>Z up</span><input type="range" id="tune-z" class="stl-tune-range" min="-0.5" max="0.5" step="0.01" value="0"><output id="tune-z-out">0.00 m</output></label>
-                  <label class="stl-tune-row"><span>Hip Z</span><input type="range" id="tune-hipz" class="stl-tune-range" min="-0.2" max="0.2" step="0.005" value="0"><output id="tune-hipz-out">0.00 m</output></label>
-                  <label class="stl-tune-row"><span>Ankle Z</span><input type="range" id="tune-anklez" class="stl-tune-range" min="-0.2" max="0.2" step="0.005" value="0"><output id="tune-anklez-out">0.00 m</output></label>
+              <div class="stl-sec" id="stl-calib-sec">
+                <h3>Camera Calibration <span class="stl-tune-hint" title="Detect the boat keypoints on a clear frame, drag any that are off to their correct pixel location, then re-solve PnP. The corrected camera pose is locked for the whole clip (Auto-PnP disabled) and baked in on Re-process.">?</span></h3>
+                <button class="btn sm" id="btn-calib-start" style="width:100%;">Calibrate keypoints</button>
+                <div id="stl-calib-status" class="heatmap-meta" style="margin-top:6px;">Detects boat keypoints on a high-confidence frame so you can drag them to the correct spot.</div>
+                <div id="stl-calib-actions" style="display:none; margin-top:8px;">
+                  <div class="stl-calib-result heatmap-meta" id="stl-calib-result"></div>
+                  <div class="stl-tune-actions">
+                    <button class="btn sm" id="btn-calib-resolve">Re-solve</button>
+                    <button class="btn sm" id="btn-calib-cancel">Cancel</button>
+                  </div>
+                  <div class="stl-tune-actions">
+                    <button class="btn sm" id="btn-calib-save">Save</button>
+                    <button class="btn sm primary" id="btn-calib-reprocess">Save + Re-process</button>
+                  </div>
+                  <button class="btn sm" id="btn-calib-clear" style="width:100%; margin-top:4px;">Clear calibration (use Auto-PnP)</button>
                 </div>
-                <div class="stl-tune-actions">
-                  <button class="btn sm" id="btn-tune-reset">Reset</button>
-                  <button class="btn sm" id="btn-tune-save">Save</button>
-                  <button class="btn sm primary" id="btn-tune-reprocess">Save + Re-process</button>
-                </div>
-                <div id="stl-tune-status" class="heatmap-meta" style="margin-top:6px;">Live preview only — Save to keep, Re-process to bake into analysis.</div>
               </div>
               <div class="stl-sec" style="flex:1"><div id="stl-skel-status">No skeleton loaded</div></div>
             </aside>
@@ -1645,6 +1648,22 @@
     </div>
     <div id="timeline-media-modal-body"></div>
     <div id="timeline-media-modal-empty">The file could not be opened from local storage.</div>
+  </div>
+</div>
+<div id="calib-editor-modal" class="modal-ov">
+  <div id="calib-editor-box" role="dialog" aria-modal="true" aria-labelledby="calib-editor-title">
+    <div id="calib-editor-head">
+      <div>
+        <div id="calib-editor-title">Boat keypoint calibration</div>
+        <div id="calib-editor-sub">Drag each labelled point onto its true location on the boat, then Apply to re-solve the camera pose.</div>
+      </div>
+      <button class="btn" id="btn-calib-editor-close">Cancel</button>
+    </div>
+    <div id="calib-editor-stage"><canvas id="calib-editor-canvas"></canvas></div>
+    <div id="calib-editor-foot">
+      <div id="calib-editor-msg" class="heatmap-meta"></div>
+      <button class="btn primary" id="btn-calib-editor-apply">Apply &amp; re-solve</button>
+    </div>
   </div>
 </div>
 <div id="assign-popup"></div>

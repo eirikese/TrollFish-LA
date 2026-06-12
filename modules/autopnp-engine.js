@@ -25,7 +25,7 @@ const MODEL_INPUT_SIZE = 640;
 const MIN_KPT_CONF = 0.8;
 const MIN_PAIRS = 6;
 
-const KEYPOINT_LABELS = [
+export const KEYPOINT_LABELS = [
   'frontdeck', 'porttop', 'portmid', 'portlow',
   'starboardtop', 'starboardmid', 'starboardlow',
   'portback', 'starboardback',
@@ -1117,6 +1117,22 @@ export async function detectBoatKeypoints(source) {
 export async function estimateCameraPose(source, initialPose = null) {
   const det = await detectBoatKeypoints(source);
   if (!det || !det.labels) return null;
+  return solveCameraPoseFromKeypoints(det, source, initialPose);
+}
+
+/**
+ * Solve the camera pose from an ALREADY-DETECTED (or manually edited) set of boat
+ * keypoints. This is the same undistort → DLT/RANSAC/LM → correct → validate
+ * pipeline used by estimateCameraPose, but with keypoints supplied by the caller
+ * — used by the manual keypoint-calibration editor.
+ *
+ * @param {{keypoints:Array<{x,y,conf}>, labels:Object, confidence?:number}} det
+ * @param {HTMLCanvasElement|HTMLVideoElement} source — for intrinsics scaling
+ * @param {Object} [initialPose]
+ * @returns {object|null} same shape as estimateCameraPose
+ */
+export async function solveCameraPoseFromKeypoints(det, source, initialPose = null) {
+  if (!det || !det.labels || !Array.isArray(det.keypoints)) return null;
 
   const calib = await getCalibration();
   const scaledIntrinsics = _intrinsicsForSource(calib, source);

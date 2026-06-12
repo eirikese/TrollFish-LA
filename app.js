@@ -15094,158 +15094,325 @@ const SKEL_CONNECTIONS = [
   [30,32],[27,31],[28,32]
 ];
 
-// ── Hull 3D camera-pose tuning (live preview) ──────────────────────────
-// Live-preview offset applied to displayed skeletons in the 3D viewer so the
-// user sees the effect of the tuning sliders immediately. The EXACT placement is
-// produced by re-processing with cfg.camera_pose_offset; this preview is a
-// first-order approximation (exact for pure translation): each placed world point
-// p is re-expressed as if the camera rotated by the small offset about its own
-// position and then translated — p' = R_off·(p − camPos) + camPos + posOffset.
-const STL_TUNE_DEFAULT = Object.freeze({ pitch_deg:0, yaw_deg:0, roll_deg:0, x_m:0, y_m:0, z_m:0, hip_z_m:0, ankle_z_m:0 });
-const STL_TUNE_CAM_POS = [-3.194, 0.02, 0.585]; // nominal camera world position (config default)
-let stlTunePreview = { ...STL_TUNE_DEFAULT };
+// ── Boat keypoint calibration (manual PnP) ─────────────────────────────
+// Lets the user drag the detected boat keypoints to their true pixel location
+// and re-solve the camera pose. The camera is rigidly mounted to the boat, so the
+// solved pose is locked for the whole clip (Auto-PnP disabled) and persisted to
+// cvConfig.manual_camera_pose, then baked in on re-process.
+let _autoPnpMod = null;
+const _calib = {
+  fileId: null,
+  frameCanvas: null,    // ImageBitmap/Canvas of the calibration frame
+  frameW: 0, frameH: 0,
+  points: [],           // [{label, x, y}] in frame pixel coords
+  solved: null,         // last solve result
+  editor: { dragIdx: -1, scale: 1 },
+};
 
-function stlTuneOffsetActive(o = stlTunePreview) {
-  return Object.keys(STL_TUNE_DEFAULT).some(k => Number(o?.[k]) || 0);
-}
-
-// Build a world-frame rotation matrix (row-major 9) from small pitch/yaw/roll
-// offsets, matching the camera-relative convention Rz(roll)·Ry(yaw)·Rx(-pitch)
-// projected into world axes (X fwd, Y lat, Z up).
-function stlTuneRotMat(o) {
-  const d2r = Math.PI / 180;
-  const rx = -(Number(o.pitch_deg) || 0) * d2r; // pitch about lateral (Y)
-  const ry = (Number(o.yaw_deg) || 0) * d2r;    // yaw about vertical (Z)
-  const rz = (Number(o.roll_deg) || 0) * d2r;   // roll about fore-aft (X)
-  const cx=Math.cos(rx), sx=Math.sin(rx), cy=Math.cos(ry), sy=Math.sin(ry), cz=Math.cos(rz), sz=Math.sin(rz);
-  // Compose about world axes: roll→X, yaw→Z, pitch→Y
-  const Rroll = [1,0,0, 0,cz,-sz, 0,sz,cz];
-  const Ryaw  = [cy,-sy,0, sy,cy,0, 0,0,1];
-  const Rpit  = [cx,0,sx, 0,1,0, -sx,0,cx];
-  const mul = (A,B)=>[
-    A[0]*B[0]+A[1]*B[3]+A[2]*B[6], A[0]*B[1]+A[1]*B[4]+A[2]*B[7], A[0]*B[2]+A[1]*B[5]+A[2]*B[8],
-    A[3]*B[0]+A[4]*B[3]+A[5]*B[6], A[3]*B[1]+A[4]*B[4]+A[5]*B[7], A[3]*B[2]+A[4]*B[5]+A[5]*B[8],
-    A[6]*B[0]+A[7]*B[3]+A[8]*B[6], A[6]*B[1]+A[7]*B[4]+A[8]*B[7], A[6]*B[2]+A[7]*B[5]+A[8]*B[8],
-  ];
-  return mul(Rroll, mul(Ryaw, Rpit));
-}
-
-// Apply the live-preview offset to a landmark dict {idx:[x,y,z]} → new dict.
-function stlTuneApplyPreview(lm) {
-  if (!lm || !stlTuneOffsetActive()) return lm;
-  const o = stlTunePreview;
-  const R = stlTuneRotMat(o);
-  const cp = STL_TUNE_CAM_POS;
-  const dx = Number(o.x_m)||0, dy = Number(o.y_m)||0, dz0 = Number(o.z_m)||0;
-  const hipZ = Number(o.hip_z_m)||0;
-  const out = {};
-  for (const k of Object.keys(lm)) {
-    const p = lm[k];
-    if (!p) { out[k] = p; continue; }
-    const vx = p[0]-cp[0], vy = p[1]-cp[1], vz = p[2]-cp[2];
-    const rx = R[0]*vx + R[1]*vy + R[2]*vz;
-    const ry = R[3]*vx + R[4]*vy + R[5]*vz;
-    const rz = R[6]*vx + R[7]*vy + R[8]*vz;
-    out[k] = [rx+cp[0]+dx, ry+cp[1]+dy, rz+cp[2]+dz0+hipZ];
+async function getAutoPnpModule() {
+  if (!_autoPnpMod) {
+    _autoPnpMod = await import(new URL('./modules/autopnp-engine.js', import.meta.url).href);
   }
-  return out;
+  return _autoPnpMod;
 }
 
-// Slider id → (offset key, output formatter)
-const STL_TUNE_FIELDS = [
-  ['tune-pitch',  'pitch_deg', v => `${v.toFixed(1)}°`],
-  ['tune-yaw',    'yaw_deg',   v => `${v.toFixed(1)}°`],
-  ['tune-roll',   'roll_deg',  v => `${v.toFixed(1)}°`],
-  ['tune-x',      'x_m',       v => `${v.toFixed(2)} m`],
-  ['tune-y',      'y_m',       v => `${v.toFixed(2)} m`],
-  ['tune-z',      'z_m',       v => `${v.toFixed(2)} m`],
-  ['tune-hipz',   'hip_z_m',   v => `${v.toFixed(2)} m`],
-  ['tune-anklez', 'ankle_z_m', v => `${v.toFixed(2)} m`],
-];
-
-function stlTuneSyncInputsFromState() {
-  for (const [id, key, fmt] of STL_TUNE_FIELDS) {
-    const input = el(id);
-    const out = el(`${id}-out`);
-    const v = Number(stlTunePreview[key]) || 0;
-    if (input) input.value = String(v);
-    if (out) out.textContent = fmt(v);
-  }
+function setCalibStatus(msg, kind = '') {
+  const e = el('stl-calib-status');
+  if (!e) return;
+  e.textContent = msg;
+  e.style.color = kind === 'ok' ? 'var(--green)' : (kind === 'err' ? 'var(--red,#e74c3c)' : 'var(--muted)');
 }
 
-function setStlTuneStatus(msg, kind = '') {
-  const elx = el('stl-tune-status');
-  if (!elx) return;
-  elx.textContent = msg;
-  elx.style.color = kind === 'ok' ? 'var(--green)' : (kind === 'err' ? 'var(--red, #e74c3c)' : 'var(--muted)');
+// Grab the current frame of a video element into a fresh canvas.
+function grabVideoFrameCanvas(videoEl) {
+  const w = videoEl.videoWidth, h = videoEl.videoHeight;
+  if (!w || !h) return null;
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  c.getContext('2d').drawImage(videoEl, 0, 0, w, h);
+  return c;
 }
 
-// Wire the Hull 3D tuning panel. onPreviewChange re-renders displayed skeletons.
-function setupStlTuningControls(onPreviewChange) {
-  // Initialise preview from the saved per-project offset.
-  const saved = state.cvConfig?.camera_pose_offset;
-  stlTunePreview = { ...STL_TUNE_DEFAULT, ...(saved && typeof saved === 'object' ? saved : {}) };
-  stlTuneSyncInputsFromState();
+function seekVideoAndWait(videoEl, t) {
+  return new Promise(resolve => {
+    let done = false;
+    const finish = () => { if (done) return; done = true; videoEl.removeEventListener('seeked', finish); resolve(); };
+    videoEl.addEventListener('seeked', finish, { once: true });
+    try { videoEl.currentTime = t; } catch { finish(); }
+    setTimeout(finish, 1500); // safety
+  });
+}
 
-  for (const [id, key, fmt] of STL_TUNE_FIELDS) {
-    const input = el(id);
-    const out = el(`${id}-out`);
-    if (!input) continue;
-    input.oninput = () => {
-      const v = Number(input.value) || 0;
-      stlTunePreview[key] = v;
-      if (out) out.textContent = fmt(v);
-      onPreviewChange?.();
-      setStlTuneStatus('Live preview — Save to keep, Re-process to bake into analysis.');
-    };
-  }
-
-  const resetBtn = el('btn-tune-reset');
-  if (resetBtn) resetBtn.onclick = () => {
-    stlTunePreview = { ...STL_TUNE_DEFAULT };
-    stlTuneSyncInputsFromState();
-    onPreviewChange?.();
-    setStlTuneStatus('Reset to no offset (not yet saved).');
-  };
-
-  const saveBtn = el('btn-tune-save');
-  if (saveBtn) saveBtn.onclick = async () => {
-    try {
-      await persistCameraPoseOffset();
-      setStlTuneStatus('Saved. Re-process to apply to skeleton positions.', 'ok');
-    } catch (e) {
-      console.error('[tune] save failed', e);
-      setStlTuneStatus(`Save failed: ${e.message || e}`, 'err');
+// Find the active slot video element to calibrate from.
+function getCalibrationVideoEl() {
+  for (const slot of state.tl?.athleteSlots || []) {
+    if (slot.currentFileId && slot.videoEl && slot.videoEl.videoWidth) {
+      return { videoEl: slot.videoEl, fileId: slot.currentFileId };
     }
-  };
-
-  const reprocBtn = el('btn-tune-reprocess');
-  if (reprocBtn) reprocBtn.onclick = async () => {
-    try {
-      await persistCameraPoseOffset();
-      setStlTuneStatus('Saved — re-processing videos with new tuning…', 'ok');
-      // Clear the live preview so the 3D view shows the freshly-baked result,
-      // not preview-on-top-of-baked.
-      stlTunePreview = { ...STL_TUNE_DEFAULT };
-      stlTuneSyncInputsFromState();
-      onPreviewChange?.();
-      await runSkeletonForAllVideos();
-      setStlTuneStatus('Re-process complete. Tuning is baked into the saved skeletons.', 'ok');
-    } catch (e) {
-      console.error('[tune] reprocess failed', e);
-      setStlTuneStatus(`Re-process failed: ${e.message || e}`, 'err');
-    }
-  };
+  }
+  return null;
 }
 
-// Persist the current preview offset into the project cvConfig.
-async function persistCameraPoseOffset() {
+// Auto-pick a high-confidence frame, detect boat keypoints, open the editor.
+async function startKeypointCalibration() {
+  const src = getCalibrationVideoEl();
+  if (!src) { setCalibStatus('No active video — park the playhead on a clip first.', 'err'); return; }
+  const AutoPnP = await getAutoPnpModule();
+  const videoEl = src.videoEl;
+  const wasPaused = videoEl.paused;
+  const origTime = videoEl.currentTime;
+  if (!wasPaused) { try { videoEl.pause(); } catch {} }
+  setCalibStatus('Scanning frames for a clear boat view…');
+
+  const dur = Number(videoEl.duration) || 0;
+  // Sample several frames spread across the clip; keep the most confident detection.
+  const ts = dur > 0
+    ? [0.1, 0.25, 0.4, 0.55, 0.7, 0.85].map(f => f * dur)
+    : [videoEl.currentTime];
+  let best = null;
+  for (const t of ts) {
+    await seekVideoAndWait(videoEl, t);
+    const canvas = grabVideoFrameCanvas(videoEl);
+    if (!canvas) continue;
+    let det;
+    try { det = await AutoPnP.detectBoatKeypoints(canvas); }
+    catch (e) { console.warn('[calib] detect failed', e); continue; }
+    const conf = Number(det?.confidence) || 0;
+    if (det && det.labels && (!best || conf > best.conf)) {
+      best = { det, canvas, t, conf };
+    }
+  }
+  // Restore the playhead so the timeline isn't left scrubbed elsewhere.
+  await seekVideoAndWait(videoEl, origTime);
+
+  if (!best) { setCalibStatus('Could not detect the boat in any sampled frame. Try a clearer section.', 'err'); return; }
+
+  _calib.fileId = src.fileId;
+  _calib.frameCanvas = best.canvas;
+  _calib.frameW = best.canvas.width;
+  _calib.frameH = best.canvas.height;
+  _calib.solved = null;
+  // Build the editable point list from labelled keypoints.
+  _calib.points = [];
+  for (const label of AutoPnP.KEYPOINT_LABELS) {
+    const idx = best.det.labels[label];
+    const kpt = (idx != null) ? best.det.keypoints[idx] : null;
+    if (kpt && isFinite(kpt.x) && isFinite(kpt.y)) {
+      _calib.points.push({ label, x: kpt.x, y: kpt.y });
+    }
+  }
+  if (_calib.points.length < 4) {
+    setCalibStatus(`Only ${_calib.points.length} keypoints found — need at least 4. Try another section.`, 'err');
+    return;
+  }
+  setCalibStatus(`Detected ${_calib.points.length} keypoints (conf ${(best.conf*100).toFixed(0)}%). Drag any that are off, then Apply.`, 'ok');
+  openCalibEditor();
+}
+
+// ── Editor overlay ─────────────────────────────────────────────────────
+function openCalibEditor() {
+  const modal = el('calib-editor-modal');
+  const canvas = el('calib-editor-canvas');
+  if (!modal || !canvas) return;
+  modal.classList.add('open');
+
+  // Fit canvas to the frame, capped by available space (CSS handles max-size).
+  canvas.width = _calib.frameW;
+  canvas.height = _calib.frameH;
+  drawCalibEditor();
+
+  const toFrameCoords = (ev) => {
+    const r = canvas.getBoundingClientRect();
+    const cx = (ev.clientX - r.left) / r.width * canvas.width;
+    const cy = (ev.clientY - r.top) / r.height * canvas.height;
+    return [cx, cy];
+  };
+  const hitRadius = Math.max(12, _calib.frameW * 0.012);
+  const pickPoint = (fx, fy) => {
+    let bi = -1, bd = hitRadius * hitRadius;
+    _calib.points.forEach((p, i) => {
+      const d = (p.x - fx) ** 2 + (p.y - fy) ** 2;
+      if (d < bd) { bd = d; bi = i; }
+    });
+    return bi;
+  };
+  canvas.onpointerdown = (ev) => {
+    const [fx, fy] = toFrameCoords(ev);
+    _calib.editor.dragIdx = pickPoint(fx, fy);
+    if (_calib.editor.dragIdx >= 0) canvas.setPointerCapture(ev.pointerId);
+  };
+  canvas.onpointermove = (ev) => {
+    if (_calib.editor.dragIdx < 0) return;
+    const [fx, fy] = toFrameCoords(ev);
+    const p = _calib.points[_calib.editor.dragIdx];
+    p.x = Math.max(0, Math.min(_calib.frameW, fx));
+    p.y = Math.max(0, Math.min(_calib.frameH, fy));
+    drawCalibEditor();
+  };
+  const endDrag = () => { _calib.editor.dragIdx = -1; };
+  canvas.onpointerup = endDrag;
+  canvas.onpointercancel = endDrag;
+
+  const close = () => closeCalibEditor();
+  const closeBtn = el('btn-calib-editor-close');
+  if (closeBtn) closeBtn.onclick = close;
+  const applyBtn = el('btn-calib-editor-apply');
+  if (applyBtn) applyBtn.onclick = async () => {
+    await resolveCalibrationPose();
+    closeCalibEditor();
+  };
+  const msg = el('calib-editor-msg');
+  if (msg) msg.textContent = 'Tip: drag points so each label sits exactly on its boat feature. Port = left side, Starboard = right.';
+}
+
+function closeCalibEditor() {
+  const modal = el('calib-editor-modal');
+  if (modal) modal.classList.remove('open');
+}
+
+const CALIB_LABEL_COLORS = {
+  frontdeck: '#ffd54f',
+  porttop: '#ff6b6b', portmid: '#ff8a8a', portlow: '#ffb3b3', portback: '#ff3b3b',
+  starboardtop: '#4dabf7', starboardmid: '#74c0fc', starboardlow: '#a5d8ff', starboardback: '#1c7ed6',
+};
+
+function drawCalibEditor() {
+  const canvas = el('calib-editor-canvas');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  if (_calib.frameCanvas) ctx.drawImage(_calib.frameCanvas, 0, 0);
+  const r = Math.max(5, _calib.frameW * 0.006);
+  ctx.lineWidth = Math.max(1.5, _calib.frameW * 0.0015);
+  ctx.font = `${Math.max(11, Math.round(_calib.frameW * 0.013))}px sans-serif`;
+  ctx.textBaseline = 'middle';
+  for (const p of _calib.points) {
+    const col = CALIB_LABEL_COLORS[p.label] || '#2ecc71';
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+    ctx.fillStyle = col;
+    ctx.globalAlpha = 0.85; ctx.fill(); ctx.globalAlpha = 1;
+    ctx.strokeStyle = '#000'; ctx.stroke();
+    ctx.strokeStyle = '#fff';
+    ctx.beginPath(); ctx.moveTo(p.x - r * 1.8, p.y); ctx.lineTo(p.x + r * 1.8, p.y);
+    ctx.moveTo(p.x, p.y - r * 1.8); ctx.lineTo(p.x, p.y + r * 1.8); ctx.stroke();
+    // label
+    ctx.fillStyle = '#000'; ctx.fillRect(p.x + r + 2, p.y - 8, ctx.measureText(p.label).width + 6, 16);
+    ctx.fillStyle = col; ctx.fillText(p.label, p.x + r + 5, p.y);
+  }
+}
+
+// Re-solve PnP from the edited keypoints (no detection — uses the dragged coords).
+async function resolveCalibrationPose() {
+  const src = getCalibrationVideoEl();
+  const AutoPnP = await getAutoPnpModule();
+  // Rebuild keypoints[] + labels{} from the edited point list.
+  const keypoints = _calib.points.map(p => ({ x: p.x, y: p.y, conf: 1.0 }));
+  const labels = {};
+  _calib.points.forEach((p, i) => { labels[p.label] = i; });
+  const det = { keypoints, labels, confidence: 1.0 };
+  // Use the calibration frame canvas as the intrinsics source (its resolution).
+  const sourceForK = _calib.frameCanvas || src?.videoEl;
+  let result = null;
+  try {
+    result = await AutoPnP.solveCameraPoseFromKeypoints(det, sourceForK);
+  } catch (e) {
+    console.error('[calib] solve failed', e);
+    setCalibStatus(`Solve failed: ${e.message || e}`, 'err');
+    return;
+  }
+  if (!result) {
+    setCalibStatus('PnP could not find a valid pose from these points (check that labels match the correct sides).', 'err');
+    return;
+  }
+  _calib.solved = result;
+  showCalibActions();
+  const a = result.angles || {};
+  el('stl-calib-result').textContent =
+    `Solved: pitch ${a.pitch_deg?.toFixed(1)}° yaw ${a.yaw_deg?.toFixed(1)}° roll ${a.roll_deg?.toFixed(1)}°, ` +
+    `pos [${result.camPos.map(v => v.toFixed(2)).join(', ')}], reproj ${result.meanErrorPx?.toFixed(1)}px.`;
+  setCalibStatus('Pose solved. Save to lock it for this project, or Save + Re-process to bake it in.', 'ok');
+}
+
+function showCalibActions() {
+  const a = el('stl-calib-actions');
+  if (a) a.style.display = '';
+}
+
+async function saveManualCameraPose() {
   if (!state.projectId) throw new Error('No project selected');
+  if (!_calib.solved) throw new Error('Nothing solved yet');
+  const s = _calib.solved;
   state.cvConfig = {
     ...(state.cvConfig || {}),
-    camera_pose_offset: { ...STL_TUNE_DEFAULT, ...stlTunePreview },
+    manual_camera_pose: {
+      camPos: s.camPos,
+      R_wc: s.R_wc,
+      angles: s.angles,
+      meanErrorPx: s.meanErrorPx,
+      keypoints: _calib.points.map(p => ({ label: p.label, x: p.x, y: p.y })),
+      frameSize: [_calib.frameW, _calib.frameH],
+      saved_at: new Date().toISOString(),
+    },
   };
   await DB.upsertCvConfig(state.projectId, state.cvConfig);
+}
+
+async function clearManualCameraPose() {
+  if (!state.projectId) return;
+  state.cvConfig = { ...(state.cvConfig || {}), manual_camera_pose: null };
+  await DB.upsertCvConfig(state.projectId, state.cvConfig);
+}
+
+// Wire the Hull 3D calibration panel buttons.
+function setupStlCalibrationControls() {
+  const startBtn = el('btn-calib-start');
+  if (startBtn) startBtn.onclick = async () => {
+    startBtn.disabled = true;
+    try { await startKeypointCalibration(); }
+    finally { startBtn.disabled = false; }
+  };
+  const resolveBtn = el('btn-calib-resolve');
+  if (resolveBtn) resolveBtn.onclick = () => openCalibEditor();
+  const cancelBtn = el('btn-calib-cancel');
+  if (cancelBtn) cancelBtn.onclick = () => {
+    const a = el('stl-calib-actions'); if (a) a.style.display = 'none';
+    _calib.solved = null;
+    setCalibStatus('Calibration discarded.');
+  };
+  const saveBtn = el('btn-calib-save');
+  if (saveBtn) saveBtn.onclick = async () => {
+    try { await saveManualCameraPose(); setCalibStatus('Saved. Re-process to apply to athlete positions.', 'ok'); }
+    catch (e) { setCalibStatus(`Save failed: ${e.message || e}`, 'err'); }
+  };
+  const reprocBtn = el('btn-calib-reprocess');
+  if (reprocBtn) reprocBtn.onclick = async () => {
+    try {
+      await saveManualCameraPose();
+      setCalibStatus('Saved — re-processing with calibrated pose…', 'ok');
+      await runSkeletonForAllVideos();
+      setCalibStatus('Re-process complete. Calibrated pose is baked into the skeletons.', 'ok');
+    } catch (e) { setCalibStatus(`Re-process failed: ${e.message || e}`, 'err'); }
+  };
+  const clearBtn = el('btn-calib-clear');
+  if (clearBtn) clearBtn.onclick = async () => {
+    try {
+      await clearManualCameraPose();
+      const a = el('stl-calib-actions'); if (a) a.style.display = 'none';
+      _calib.solved = null;
+      setCalibStatus('Calibration cleared — Auto-PnP will be used on next re-process.', 'ok');
+    } catch (e) { setCalibStatus(`Clear failed: ${e.message || e}`, 'err'); }
+  };
+
+  // Reflect existing saved calibration.
+  if (state.cvConfig?.manual_camera_pose) {
+    showCalibActions();
+    const mp = state.cvConfig.manual_camera_pose;
+    const a = mp.angles || {};
+    const res = el('stl-calib-result');
+    if (res) res.textContent = `Saved calibration: pitch ${a.pitch_deg?.toFixed?.(1) ?? '?'}° yaw ${a.yaw_deg?.toFixed?.(1) ?? '?'}° roll ${a.roll_deg?.toFixed?.(1) ?? '?'}°.`;
+    setCalibStatus('A manual calibration is saved for this project (Auto-PnP disabled).', 'ok');
+  }
 }
 
 async function loadSkeletonFrames(projectId, fileId) {
@@ -17420,7 +17587,6 @@ async function openStlViewer() {
   function updateEntryMesh(entry, lm) {
     const { bonePos, jointPos, boneGeom, jointGeom, comSphere } = entry;
     const HIDE = -9999; // off-screen Y for missing landmarks
-    if (lm) lm = stlTuneApplyPreview(lm); // live tuning preview (no-op when offset is zero)
     if(!lm) {
       for(let i = 0; i < NJ; i++) {
         jointPos[i*3] = 0; jointPos[i*3+1] = HIDE; jointPos[i*3+2] = 0;
@@ -17730,16 +17896,8 @@ async function openStlViewer() {
   tog('stl-tog-com', v => { for(const e of skelEntries) e.comSphere.visible = v; });
   tog('stl-tog-grid', v => { grid.visible = v; });
 
-  // ── Camera pose tuning controls ──────────────────────────────────────
-  // Force every displayed skeleton to re-render with the current preview offset.
-  const refreshTunedMeshes = () => {
-    for (const entry of skelEntries) {
-      const lm = entry._lastFrame?.lm || entry.frames?.[0]?.lm;
-      if (lm) updateEntryMesh(entry, lm);
-    }
-    sceneNeedsRender = true;
-  };
-  setupStlTuningControls(refreshTunedMeshes);
+  // ── Camera keypoint calibration ──────────────────────────────────────
+  setupStlCalibrationControls();
 
   let animId;
   let lastRenderTs = 0;

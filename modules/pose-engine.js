@@ -23,8 +23,6 @@ import {
   defaultCameraPoseAndRotation,
   computePlacedSkeletonSymmetricRaycast,
   placeSkeletonOnBoat,
-  applyCameraPoseOffset,
-  cameraPoseOffsetIsActive,
 } from './rayplane.js';
 import { SkeletonPlacementKalman, KALMAN_DEFAULTS } from './skeleton-filter.js?v=20260604pose2';
 import { computeFrameMetrics, scaleSkeletonToAthleteHeight } from './skeleton-metrics.js?v=20260604pose2';
@@ -911,9 +909,25 @@ export async function processVideo(projectId, fileId, cvConfig = null, onProgres
       camPos[2] = cfg.camera_position[2];
     }
 
-    // Auto-PnP config
+    // Manual keypoint-calibrated pose: a fixed camera pose solved from the user's
+    // hand-corrected boat keypoints. The camera is rigidly mounted, so one pose
+    // applies to the whole clip — lock it in and skip Auto-PnP entirely.
+    const manualPose = cfg.manual_camera_pose;
+    const manualPoseLocked = !!(manualPose && Array.isArray(manualPose.camPos) && Array.isArray(manualPose.R_wc));
+    if (manualPoseLocked) {
+      camPos[0] = Number(manualPose.camPos[0]);
+      camPos[1] = Number(manualPose.camPos[1]);
+      camPos[2] = Number(manualPose.camPos[2]);
+      // R_wc may be a nested 3×3 or a flat 9 array — flatten to row-major 9.
+      const m = manualPose.R_wc;
+      const flat = (Array.isArray(m[0])) ? [m[0][0],m[0][1],m[0][2], m[1][0],m[1][1],m[1][2], m[2][0],m[2][1],m[2][2]] : m;
+      for (let j = 0; j < 9; j++) R_wc[j] = Number(flat[j]);
+      console.log(`[Pose] using MANUAL keypoint-calibrated camera pose: camPos=[${camPos.map(v=>v.toFixed(3))}] (Auto-PnP disabled)`);
+    }
+
+    // Auto-PnP config — force-disabled when a manual pose is locked in.
     const autoPnpCfg = cfg.auto_camera_pnp || {};
-    const autoPnpEnabled = autoPnpCfg.enabled !== false;
+    const autoPnpEnabled = !manualPoseLocked && autoPnpCfg.enabled !== false;
     const autoPnpInterval = Math.max(1, Math.round(Number(autoPnpCfg.interval_frames) || 30)); // every N frames
     let autoPnpReady = false;
     let cameraYawDeg = Number(cfg.camera_yaw_deg);
@@ -982,12 +996,6 @@ export async function processVideo(projectId, fileId, cvConfig = null, onProgres
 
     const zHip = cfg.hip_plane_z ?? SKELETON_HIP_PLANE_Z;
     const zAnkle = cfg.lower_plane_z ?? SKELETON_LOWER_PLANE_Z;
-    // Manual tuning offset (Hull 3D panel) applied on top of the camera pose.
-    const poseOffset = cfg.camera_pose_offset || null;
-    const poseOffsetActive = cameraPoseOffsetIsActive(poseOffset);
-    if (poseOffsetActive) {
-      console.log(`[Pose] manual camera_pose_offset active: ${JSON.stringify(poseOffset)}`);
-    }
     const athleteMass = Number.isFinite(Number(opts.athleteWeight))
       ? Number(opts.athleteWeight)
       : (cfg.athlete_weight ?? 75);
@@ -1290,19 +1298,9 @@ export async function processVideo(projectId, fileId, cvConfig = null, onProgres
           }
         }
 
-        // Apply manual tuning offset on top of the (Auto-PnP) camera pose.
-        let camPosUsed = camPos, R_wcUsed = R_wc, zHipUsed = zHip, zAnkleUsed = zAnkle;
-        if (poseOffsetActive) {
-          const adj = applyCameraPoseOffset(R_wc, camPos, poseOffset);
-          camPosUsed = adj.camPos;
-          R_wcUsed = adj.R_wc;
-          zHipUsed = zHip + (Number(poseOffset.hip_z_m) || 0);
-          zAnkleUsed = zAnkle + (Number(poseOffset.ankle_z_m) || 0);
-        }
-
         // Place skeleton on boat
         let placed = computePlacedSkeletonSymmetricRaycast(
-          worldDict, normDict, K, imgW, imgH, camPosUsed, R_wcUsed, zHipUsed, zAnkleUsed
+          worldDict, normDict, K, imgW, imgH, camPos, R_wc, zHip, zAnkle
         );
         let placementMethod = placed ? 'raycast' : null;
         if (!placed) {
