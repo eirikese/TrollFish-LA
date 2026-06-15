@@ -15085,7 +15085,7 @@ async function registerServiceWorker() {
   }
   try {
     const registration = await navigator.serviceWorker.register(
-      new URL('./sw.js?v=20260612csvmap1', import.meta.url).toString(),
+      new URL('./sw.js?v=20260615extsync1', import.meta.url).toString(),
       { updateViaCache: 'none' },
     );
     registration.update().catch(() => {});
