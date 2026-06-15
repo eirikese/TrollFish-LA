@@ -128,6 +128,12 @@ const state = {
   timelineStatOverlayGraph: false,
   timelineSogGapStitching: false,
   externalVideoContinuousTimeSync: false,
+  videoLayoutButtonVisible: false,
+  analysisColumns: {
+    mapMinimized: false,
+    videoMinimized: false,
+  },
+  timelineStatVisibility: {},
   poseMode: '3d',
   poseMinConfidence: 0.8,
   poseInputMaxDim: 480,
@@ -201,6 +207,9 @@ const TL_STATS_WINDOW_KEY = 'trollfish_tlStatsWindowSec_v1';
 const TL_STATS_OVERLAY_GRAPH_KEY = 'trollfish_tlStatsOverlayGraph_v1';
 const TL_SOG_GAP_STITCHING_KEY = 'trollfish_tlSogGapStitching_v1';
 const EXTERNAL_VIDEO_CONTINUOUS_TIME_SYNC_KEY = 'trollfish_externalVideoContinuousTimeSync_v1';
+const VIDEO_LAYOUT_BUTTON_VISIBLE_KEY = 'trollfish_videoLayoutButtonVisible_v1';
+const ANALYSIS_COLUMNS_KEY = 'trollfish_analysisColumns_v1';
+const TIMELINE_STAT_VISIBILITY_KEY = 'trollfish_timelineStatVisibility_v1';
 const POSE_MODE_KEY = 'trollfish_poseMode_v1';
 const POSE_MIN_CONFIDENCE_KEY = 'trollfish_poseMinConfidence_v1';
 const POSE_INPUT_MAX_DIM_KEY = 'trollfish_poseInputMaxDim_v1';
@@ -423,6 +432,65 @@ function isExternalVideoContinuousTimeSyncEnabled() {
   return !!state.externalVideoContinuousTimeSync;
 }
 
+function loadVideoLayoutButtonVisibilitySetting() {
+  state.videoLayoutButtonVisible = !!loadJsonLocal(VIDEO_LAYOUT_BUTTON_VISIBLE_KEY, false);
+  const toggle = el('video-layout-button-visible-toggle');
+  if (toggle) toggle.checked = !!state.videoLayoutButtonVisible;
+  syncVideoLayoutButton();
+}
+
+function setVideoLayoutButtonVisible(enabled) {
+  state.videoLayoutButtonVisible = !!enabled;
+  saveJsonLocal(VIDEO_LAYOUT_BUTTON_VISIBLE_KEY, state.videoLayoutButtonVisible);
+  const toggle = el('video-layout-button-visible-toggle');
+  if (toggle) toggle.checked = !!state.videoLayoutButtonVisible;
+  syncVideoLayoutButton();
+}
+
+function normalizeTimelineStatVisibility(raw = {}) {
+  const input = raw && typeof raw === 'object' ? raw : {};
+  const out = {};
+  for (const def of TIMELINE_STAT_DEFS) {
+    out[def.key] = input[def.key] == null ? true : !!input[def.key];
+  }
+  return out;
+}
+
+function loadTimelineStatVisibilitySetting() {
+  state.timelineStatVisibility = normalizeTimelineStatVisibility(loadJsonLocal(TIMELINE_STAT_VISIBILITY_KEY, {}));
+  syncTimelineStatVisibilityInputs();
+}
+
+function saveTimelineStatVisibilitySetting() {
+  saveJsonLocal(TIMELINE_STAT_VISIBILITY_KEY, normalizeTimelineStatVisibility(state.timelineStatVisibility));
+}
+
+function isTimelineStatUserVisible(metricKey) {
+  const visibility = normalizeTimelineStatVisibility(state.timelineStatVisibility);
+  return visibility[metricKey] !== false;
+}
+
+function syncTimelineStatVisibilityInputs() {
+  const visibility = normalizeTimelineStatVisibility(state.timelineStatVisibility);
+  document.querySelectorAll('[data-timeline-stat-toggle]').forEach(input => {
+    const key = input.getAttribute('data-timeline-stat-toggle');
+    if (key in visibility) input.checked = visibility[key] !== false;
+  });
+}
+
+function setTimelineStatVisible(metricKey, visible) {
+  if (!TIMELINE_STAT_DEFS.some(def => def.key === metricKey)) return;
+  state.timelineStatVisibility = normalizeTimelineStatVisibility({
+    ...(state.timelineStatVisibility || {}),
+    [metricKey]: !!visible,
+  });
+  saveTimelineStatVisibilitySetting();
+  syncTimelineStatVisibilityInputs();
+  syncTimelineOverlayMetricSelectionAcrossSlots();
+  populateTimelineStats();
+  updateTimelineStats(true);
+}
+
 function normalizePoseInputMaxDim(value) {
   const num = Number(value);
   if (!Number.isFinite(num)) return 480;
@@ -556,8 +624,31 @@ function isTimelineStatVisibleByHeatmapMenu(metricKey) {
   return linkedKeys.every(key => isInlineHeatmapMenuItemVisible(key));
 }
 
+function hasTimelineWindAvailable() {
+  if (hasResolvedWindEstimate(state.wind?.localNow)) return true;
+  if (hasResolvedWindEstimate(state.wind?.session)) return true;
+  return Object.values(state.wind?.byCsvId || {}).some(wind => hasResolvedWindEstimate(wind));
+}
+
+function isWindTimelineStat(metricKey) {
+  return metricKey === 'vmg' || metricKey === 'twa' || metricKey === 'cwa';
+}
+
+function refreshTimelineStatsForWindAvailabilityChange() {
+  const windAvailable = hasTimelineWindAvailable();
+  if (state.wind._statsWindAvailable === windAvailable) return;
+  state.wind._statsWindAvailable = windAvailable;
+  syncTimelineOverlayMetricSelectionAcrossSlots();
+  populateTimelineStats();
+}
+
 function getVisibleTimelineStatDefs() {
-  return TIMELINE_STAT_DEFS.filter(def => isTimelineStatVisibleByHeatmapMenu(def.key));
+  const windAvailable = hasTimelineWindAvailable();
+  return TIMELINE_STAT_DEFS.filter(def => (
+    isTimelineStatUserVisible(def.key)
+    && isTimelineStatVisibleByHeatmapMenu(def.key)
+    && (!isWindTimelineStat(def.key) || windAvailable)
+  ));
 }
 
 function refreshInlineHeatmapsForMenuVisibilityChange() {
@@ -1950,8 +2041,9 @@ function ensurePhonePlaybackDom() {
   phone.labelEl = label;
   if (!phone.videoEl) {
     const video = document.createElement('video');
-    video.muted = true;
-    video.defaultMuted = true;
+    video.muted = false;
+    video.defaultMuted = false;
+    video.volume = 1;
     video.playsInline = true;
     video.setAttribute('playsinline', '');
     video.setAttribute('webkit-playsinline', '');
@@ -2144,6 +2236,9 @@ async function switchPhonePlaybackSource(item, videoSec, autoPlayAfterLoad = fal
   }
 
   const videoEl = phone.videoEl;
+  videoEl.muted = false;
+  videoEl.defaultMuted = false;
+  try { videoEl.volume = 1; } catch {}
   const sameSource = !forceReload
     && videoEl._loadedFileId === fileId
     && videoEl._loadedURL === url
@@ -2183,6 +2278,8 @@ async function switchPhonePlaybackSource(item, videoSec, autoPlayAfterLoad = fal
   phone.lastDriftCorrectAt = 0;
   setPhonePlaybackVisible(item, true);
   try { videoEl.playbackRate = state.tl.playbackRate; } catch {}
+  videoEl.muted = false;
+  try { videoEl.volume = 1; } catch {}
   if (autoPlayAfterLoad || state.tl.playing) {
     const playPromise = videoEl.play();
     if (playPromise?.catch) playPromise.catch(() => {});
@@ -2233,6 +2330,8 @@ function syncPhonePlaybackToTimeline({ forceSeek = false, forceReload = false } 
     }
   }
   try { phone.videoEl.playbackRate = state.tl.playbackRate; } catch {}
+  phone.videoEl.muted = false;
+  try { phone.videoEl.volume = 1; } catch {}
   if (state.tl.playing) {
     if (phone.videoEl.paused) {
       const playPromise = phone.videoEl.play();
@@ -7184,6 +7283,7 @@ function updateCurrentWindEstimate(absTs = state.tl?.currentTs, { forceRender = 
     sampleTs: candidates.length ? candidates[0].ts : null,
   } : null;
   renderWindMapControl();
+  refreshTimelineStatsForWindAvailabilityChange();
   if (forceRender || !state.tl?.playing) updateTimelineStats();
   return state.wind.localNow;
 }
@@ -7226,9 +7326,11 @@ async function loadWindEstimates() {
     state.wind._lastLocalEvalTs = NaN;
     renderWindMapControl();
     renderWindMapLayer();
+    refreshTimelineStatsForWindAvailabilityChange();
     if (!projectId || !csvs.length) {
       state.wind.loading = false;
       renderWindMapControl();
+      refreshTimelineStatsForWindAvailabilityChange();
       return;
     }
 
@@ -7290,6 +7392,7 @@ async function loadWindEstimates() {
     updateCurrentWindEstimate(state.tl?.currentTs, { forceRender: true });
     renderWindMapLayer();
     renderWindMapControl();
+    refreshTimelineStatsForWindAvailabilityChange();
     if (projectId === state.projectId) void refreshManeuvers('wind-updated');
   })();
   state.wind.promise = promise;
@@ -11114,9 +11217,12 @@ function videoSec2AbsTs(vid, videoSec) {
  */
 function findLatLonForTs(ts) {
   if(!state.mapData) return null;
-  const vids = state.mapData.videos || [];
-  for(const v of vids) {
-    const pts = validLatLonPoints(getTrackTelemetryPoints(v));
+  const tracks = [
+    ...(state.mapData.csvs || []),
+    ...(state.mapData.videos || []),
+  ];
+  for(const track of tracks) {
+    const pts = validLatLonPoints(getTrackTelemetryPoints(track));
     if(!pts.length) continue;
     let bestIdx = 0;
     for(let i = 0; i < pts.length; i++) {
@@ -11377,7 +11483,8 @@ function initSogScrub() {
     const xFrac = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
     const pivot = vStart + xFrac * vDur; // time at cursor
 
-    const zoomFactor = e.deltaY > 0 ? 1.25 : 0.8; // scroll down = zoom out, up = zoom in
+    const rawZoomFactor = Math.pow(1.0015, e.deltaY || 0);
+    const zoomFactor = Math.max(0.88, Math.min(1.14, rawZoomFactor)); // scroll down = zoom out, up = zoom in
     let newDur = vDur * zoomFactor;
     // Clamp: min 10 seconds, max = full range
     newDur = Math.max(10, Math.min(globalDur, newDur));
@@ -13085,11 +13192,20 @@ function drawSegmentSelectHighlight() {
   const ss = state.segmentSelect;
   if(ss.highlightLayer && state.map) { state.map.removeLayer(ss.highlightLayer); ss.highlightLayer = null; }
   if(ss.tsStart == null || ss.tsEnd == null || !state.mapData) return;
-  const vids = state.mapData.videos || [];
+  const tracks = [
+    ...(state.mapData.csvs || []),
+    ...(state.mapData.videos || []),
+  ];
   const lg = L.layerGroup();
-  for(const v of vids) {
-    const color = state.videoColors[v.id] || '#f5a623';
-    const pts = (v.points || []).filter(p => p.ts != null && p.ts >= ss.tsStart && p.ts <= ss.tsEnd);
+  for(const track of tracks) {
+    const color = state.videoColors[track.id] || '#f5a623';
+    const pts = getTrackTelemetryPoints(track).filter(p => (
+      p.ts != null &&
+      p.ts >= ss.tsStart &&
+      p.ts <= ss.tsEnd &&
+      Number.isFinite(Number(p.lat)) &&
+      Number.isFinite(Number(p.lon))
+    ));
     if(pts.length >= 2) {
       L.polyline(pts.map(p=>[p.lat,p.lon]), {color, weight:10, opacity:0.85}).addTo(lg);
     }
@@ -13171,10 +13287,14 @@ async function saveNewSegment() {
   await saveSegments();
   cancelSegmentCreation();
 
-  // Auto-start processing pipeline for ALL overlapping videos in the segment
-  try {
-    reprocessSegment(seg);
-  } catch(e) { console.warn('Auto-process after segment creation failed:', e); }
+  // Auto-start processing only when analyzable GoPro videos overlap. CSV/external-only
+  // segments are still valid and should not raise a "no analyzable videos" alert.
+  const analyzableOverlap = findOverlappingVideos(seg, { analyzableOnly: true });
+  if (analyzableOverlap.length) {
+    try {
+      reprocessSegment(seg);
+    } catch(e) { console.warn('Auto-process after segment creation failed:', e); }
+  }
 
   renderMap();
   renderSegmentPanel();
@@ -14184,6 +14304,7 @@ function setVideoSlotHidden(slot, hidden) {
 function showAllVideoSlots() {
   state.hiddenVideoSlots = {};
   saveHiddenVideoSlots();
+  showAllAnalysisColumns();
   applyVideoSlotVisibility();
   if (Number.isFinite(Number(state.tl?.currentTs))) tlSeekTo(state.tl.currentTs);
   drawSogCanvas();
@@ -14212,6 +14333,58 @@ function setTemporaryVideoLayout(value) {
   applyVideoLayout();
   syncVideoLayoutButton();
   renderVideoLayoutPopover();
+}
+
+function normalizeAnalysisColumns(value = {}) {
+  const input = value && typeof value === 'object' ? value : {};
+  return {
+    mapMinimized: !!input.mapMinimized,
+    videoMinimized: !!input.videoMinimized,
+  };
+}
+
+function saveAnalysisColumnsSetting() {
+  saveJsonLocal(ANALYSIS_COLUMNS_KEY, normalizeAnalysisColumns(state.analysisColumns));
+}
+
+function applyAnalysisColumnsState() {
+  state.analysisColumns = normalizeAnalysisColumns(state.analysisColumns);
+  const layout = el('layout');
+  if (!layout) return;
+  layout.classList.toggle('map-col-minimized', !!state.analysisColumns.mapMinimized);
+  layout.classList.toggle('video-col-minimized', !!state.analysisColumns.videoMinimized);
+  const mapBtn = el('btn-expand-map-col');
+  if (mapBtn) mapBtn.style.display = state.analysisColumns.mapMinimized ? 'flex' : 'none';
+  const videoBtn = el('btn-expand-video-col');
+  if (videoBtn) videoBtn.style.display = state.analysisColumns.videoMinimized ? 'flex' : 'none';
+  const mapMinBtn = el('btn-min-map-col');
+  if (mapMinBtn) mapMinBtn.style.display = state.analysisColumns.mapMinimized ? 'none' : 'inline-flex';
+  const videoMinBtn = el('btn-min-video-col');
+  if (videoMinBtn) videoMinBtn.style.display = state.analysisColumns.videoMinimized ? 'none' : 'inline-flex';
+  syncPhonePlaybackShellSize();
+  syncInlineHeatmapPanelLayout();
+  scheduleAnalysisMapResize();
+  applyVideoPaneGridPositions();
+}
+
+function loadAnalysisColumnsSetting() {
+  state.analysisColumns = normalizeAnalysisColumns(loadJsonLocal(ANALYSIS_COLUMNS_KEY, {}));
+  applyAnalysisColumnsState();
+}
+
+function setAnalysisColumnMinimized(column, minimized, { persist = true } = {}) {
+  const next = normalizeAnalysisColumns(state.analysisColumns);
+  if (column === 'map') next.mapMinimized = !!minimized;
+  if (column === 'video') next.videoMinimized = !!minimized;
+  state.analysisColumns = next;
+  if (persist) saveAnalysisColumnsSetting();
+  applyAnalysisColumnsState();
+}
+
+function showAllAnalysisColumns() {
+  state.analysisColumns = { mapMinimized: false, videoMinimized: false };
+  saveAnalysisColumnsSetting();
+  applyAnalysisColumnsState();
 }
 
 function getVisibleTimelineVideoPaneCount() {
@@ -14294,8 +14467,9 @@ function syncVideoLayoutButton() {
   if (btn) btn.textContent = getVideoLayoutLabel();
   const wrap = el('video-layout-wrap');
   const hasMultipleSlots = (state.tl?.athleteSlots || []).length > 1;
-  if (wrap) wrap.style.display = hasMultipleSlots ? '' : 'none';
-  if (!hasMultipleSlots) closeVideoLayoutPopover();
+  const visible = !!state.videoLayoutButtonVisible && hasMultipleSlots;
+  if (wrap) wrap.style.display = visible ? '' : 'none';
+  if (!visible) closeVideoLayoutPopover();
   document.querySelectorAll('.layout-choice').forEach(choice => {
     choice.classList.toggle('active', normalizeVideoLayout(choice.dataset.layout) === normalizeVideoLayout(state.videoLayout));
   });
@@ -14586,6 +14760,8 @@ function applyAdvancedModeVisibility() {
   if (featureBoomPredictionsToggle) featureBoomPredictionsToggle.checked = areBoomPredictionsEnabled();
   const featureRudderPredictionsToggle = el('feature-rudder-predictions-toggle');
   if (featureRudderPredictionsToggle) featureRudderPredictionsToggle.checked = areRudderPredictionsEnabled();
+  const videoLayoutVisibleToggle = el('video-layout-button-visible-toggle');
+  if (videoLayoutVisibleToggle) videoLayoutVisibleToggle.checked = !!state.videoLayoutButtonVisible;
   const poseModeSelect = el('pose-mode-select');
   if (poseModeSelect) poseModeSelect.value = getPoseMode();
   const poseMinConfidenceInput = el('pose-2d-threshold-input');
@@ -14596,6 +14772,7 @@ function applyAdvancedModeVisibility() {
   if (poseExactSegmentSeekToggle) poseExactSegmentSeekToggle.checked = isPoseExactSegmentSeekEnabled();
   const externalVideoContinuousSyncToggle = el('external-video-continuous-sync-toggle');
   if (externalVideoContinuousSyncToggle) externalVideoContinuousSyncToggle.checked = isExternalVideoContinuousTimeSyncEnabled();
+  syncTimelineStatVisibilityInputs();
   syncInlineHeatmapMenuVisibilityInputs();
   const settingsWrap = el('ath-settings-wrap');
   if (settingsWrap) settingsWrap.classList.toggle('open', advanced);
@@ -15085,7 +15262,7 @@ async function registerServiceWorker() {
   }
   try {
     const registration = await navigator.serviceWorker.register(
-      new URL('./sw.js?v=20260615extsync1', import.meta.url).toString(),
+      new URL('./sw.js?v=20260615layoutstats1', import.meta.url).toString(),
       { updateViaCache: 'none' },
     );
     registration.update().catch(() => {});
@@ -15110,11 +15287,14 @@ async function init() {
   loadAdvancedModeSetting();
   loadAdvancedFeaturesSetting();
   loadVideoLayoutSetting();
+  loadVideoLayoutButtonVisibilitySetting();
+  loadAnalysisColumnsSetting();
   loadReportOptionsSetting();
   loadTimelineStatsWindowSetting();
   loadTimelineStatOverlayGraphSetting();
   loadTimelineSogGapStitchingSetting();
   loadExternalVideoContinuousTimeSyncSetting();
+  loadTimelineStatVisibilitySetting();
   loadPoseProcessingSettings();
   loadInlineHeatmapMenuVisibilitySetting();
   loadInlineHeatmapPanelWidthSetting();
@@ -15209,6 +15389,14 @@ async function init() {
   if (tlSogGapStitchingToggle) tlSogGapStitchingToggle.addEventListener('change', e => setTimelineSogGapStitching(e.target.checked));
   const externalVideoContinuousSyncToggle = el('external-video-continuous-sync-toggle');
   if (externalVideoContinuousSyncToggle) externalVideoContinuousSyncToggle.addEventListener('change', e => setExternalVideoContinuousTimeSync(e.target.checked));
+  const videoLayoutVisibleToggle = el('video-layout-button-visible-toggle');
+  if (videoLayoutVisibleToggle) videoLayoutVisibleToggle.addEventListener('change', e => setVideoLayoutButtonVisible(e.target.checked));
+  document.querySelectorAll('[data-timeline-stat-toggle]').forEach(input => {
+    input.addEventListener('change', e => setTimelineStatVisible(
+      e.target.getAttribute('data-timeline-stat-toggle'),
+      e.target.checked,
+    ));
+  });
   const advTowToggle = el('advanced-tow-filter-toggle');
   if (advTowToggle) advTowToggle.addEventListener('change', e => setTowFilteringDisabledForTrustedSession(!e.target.checked));
   const advToggle = el('advanced-mode-toggle');
@@ -15240,6 +15428,10 @@ async function init() {
   });
   const showAllVideosBtn = el('btn-video-show-all');
   if (showAllVideosBtn) showAllVideosBtn.onclick = () => showAllVideoSlots();
+  el('btn-min-map-col')?.addEventListener('click', () => setAnalysisColumnMinimized('map', true));
+  el('btn-expand-map-col')?.addEventListener('click', () => setAnalysisColumnMinimized('map', false));
+  el('btn-min-video-col')?.addEventListener('click', () => setAnalysisColumnMinimized('video', true));
+  el('btn-expand-video-col')?.addEventListener('click', () => setAnalysisColumnMinimized('video', false));
   const reportPolarToggle = el('report-opt-polar-plots');
   if (reportPolarToggle) reportPolarToggle.addEventListener('change', e => setReportPolarPlots(e.target.checked));
   const reportTackToggle = el('report-opt-tack-analysis');

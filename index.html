@@ -23,7 +23,6 @@
 
     /* ── Topbar ───────────────────────────────────────────── */
     #topbar { display: flex; align-items: center; gap: 8px; flex-shrink: 0; padding: 0 14px; height: var(--topbar-h); background: var(--surface); border-bottom: 1px solid var(--border); position: relative; z-index: 700; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
-    .brand { font-weight: 700; font-size: 17px; color: var(--accent); margin-right: 2px; white-space: nowrap; letter-spacing: .02em; }
     .spacer { flex: 1; }
     .btn { display: inline-flex; align-items: center; gap: 6px; padding: 7px 14px; border-radius: var(--radius); border: 1px solid var(--border); background: var(--surface2); color: var(--text); cursor: pointer; font-size: 14px; font-weight: 500; transition: background .12s, border-color .12s; white-space: nowrap; line-height: 1; }
     .btn:hover { background: var(--surface); border-color: var(--accent); color: var(--accent-h); }
@@ -198,8 +197,20 @@
     #layout { display: flex; flex: 1; min-height: 0; overflow: hidden; }
     #panel-left { display: flex; flex-direction: column; width: 58%; min-width: 280px; min-height: 0; flex-shrink: 0; overflow: hidden; }
     #layout.phone-playback-active #panel-left { width: max(280px, calc(58% - var(--phone-playback-width, 0px))); }
-    #map-workspace { display: flex; flex: 1; min-height: 120px; min-width: 0; overflow: hidden; }
+    #layout.map-col-minimized #panel-left { display: none; }
+    #layout.video-col-minimized #panel-right { display: none; }
+    #layout.map-col-minimized #divider,
+    #layout.video-col-minimized #divider { display: none; }
+    #map-workspace { position: relative; display: flex; flex: 1; min-height: 120px; min-width: 0; overflow: hidden; }
     #map { flex: 1 1 auto; min-width: 140px; min-height: 120px; position: relative; }
+    .col-minimize-btn,
+    .col-expand-btn { position: absolute; z-index: 950; width: 28px; height: 44px; padding: 0; align-items: center; justify-content: center; border-radius: 8px; border: 1px solid rgba(15,23,42,.18); background: rgba(255,255,255,.94); color: var(--text); box-shadow: 0 8px 18px rgba(15,23,42,.18); font-size: 18px; font-weight: 800; line-height: 1; }
+    .col-minimize-btn:hover,
+    .col-expand-btn:hover { color: var(--accent); border-color: rgba(26,115,232,.36); }
+    #btn-min-map-col { top: 12px; right: 10px; }
+    #btn-min-video-col { top: 12px; left: 10px; background: rgba(0,0,0,.68); color: #fff; border-color: rgba(255,255,255,.22); }
+    #btn-expand-map-col { display: none; position: fixed; left: 0; top: calc(var(--topbar-h) + 44%); border-radius: 0 8px 8px 0; }
+    #btn-expand-video-col { display: none; position: fixed; right: 0; top: calc(var(--topbar-h) + 44%); border-radius: 8px 0 0 8px; }
 
     /* Map controls */
     #map-controls { background: var(--surface); border-top: 1px solid var(--border); flex-shrink: 0; max-height: min(34vh, 280px); overflow-y: auto; overscroll-behavior: contain; }
@@ -316,7 +327,7 @@
     #inline-heatmap-panel .video-pane-heatmaps { display: flex; flex: 1 1 0; min-width: 0; min-height: 0; flex-direction: column; gap: 6px; overflow-y: auto; padding-right: 1px; }
 
     /* Right panel (analysis view — videos only) */
-    #panel-right { flex: 1; display: flex; flex-direction: column; min-width: 0; overflow: hidden; }
+    #panel-right { position: relative; flex: 1; display: flex; flex-direction: column; min-width: 0; overflow: hidden; }
     #layout.phone-playback-active #panel-right { flex-direction: row; }
     #layout.phone-playback-active #panel-left { min-width: 280px; }
     #panel-right.maneuver-mode { flex-direction: column !important; background: linear-gradient(180deg, #f7f9fc 0%, #eef3f9 100%); }
@@ -1076,8 +1087,6 @@
 <!-- Topbar                                                      -->
 <!-- ═══════════════════════════════════════════════════════════ -->
 <div id="topbar">
-  <span class="brand">TrollFish</span>
-
   <!-- Project hamburger -->
   <div id="project-wrap">
     <button class="btn" id="btn-hamburger">
@@ -1280,9 +1289,12 @@
   <!-- ─── Analysis View (map + videos + timeline) ─────────────── -->
   <div id="view-analysis" class="view-panel active-view">
     <div id="layout">
+      <button class="btn col-expand-btn" id="btn-expand-map-col" type="button" title="Show map">›</button>
+      <button class="btn col-expand-btn" id="btn-expand-video-col" type="button" title="Show athlete videos">‹</button>
       <div id="panel-left">
         <div id="map-workspace">
           <div id="map"></div>
+          <button class="btn col-minimize-btn" id="btn-min-map-col" type="button" title="Hide map">‹</button>
           <div id="inline-heatmap-divider" aria-hidden="true"></div>
           <aside id="inline-heatmap-panel" aria-label="Segment stats beside map"></aside>
         </div>
@@ -1393,6 +1405,7 @@
       <aside id="timeline-stat-panel" aria-label="Timeline stat overlay graphs"></aside>
 
       <div id="panel-right">
+        <button class="btn col-minimize-btn" id="btn-min-video-col" type="button" title="Hide athlete videos">›</button>
         <div id="phone-playback-shell">
           <div id="phone-playback-pane" class="video-pane phone-playback-pane" style="display:none;">
             <div class="video-pane-body">
@@ -1518,6 +1531,10 @@
             <span>Wind panel</span>
             <span class="stl-tog"><input type="checkbox" id="feature-wind-panel-toggle"><span class="stl-tog-sl"></span></span>
           </label>
+          <label class="stl-tog-row" title="Show the athlete video layout button in the top bar. Hidden by default to save space.">
+            <span>Video layout button</span>
+            <span class="stl-tog"><input type="checkbox" id="video-layout-button-visible-toggle"><span class="stl-tog-sl"></span></span>
+          </label>
           <label class="stl-tog-row" title="Run boom angle predictions during pose and maneuver processing">
             <span>Boom predictions</span>
             <span class="stl-tog"><input type="checkbox" id="feature-boom-predictions-toggle"><span class="stl-tog-sl"></span></span>
@@ -1526,6 +1543,21 @@
             <span>Rudder predictions</span>
             <span class="stl-tog"><input type="checkbox" id="feature-rudder-predictions-toggle"><span class="stl-tog-sl"></span></span>
           </label>
+        </div>
+        <div class="advanced-settings-group">
+          <div class="advanced-settings-title">Live Stats Visibility</div>
+          <div class="advanced-settings-grid">
+            <label class="stl-tog-row"><span>SOG</span><span class="stl-tog"><input type="checkbox" data-timeline-stat-toggle="sog" checked><span class="stl-tog-sl"></span></span></label>
+            <label class="stl-tog-row"><span>COG</span><span class="stl-tog"><input type="checkbox" data-timeline-stat-toggle="heading" checked><span class="stl-tog-sl"></span></span></label>
+            <label class="stl-tog-row"><span>Heel</span><span class="stl-tog"><input type="checkbox" data-timeline-stat-toggle="heel" checked><span class="stl-tog-sl"></span></span></label>
+            <label class="stl-tog-row"><span>Pitch</span><span class="stl-tog"><input type="checkbox" data-timeline-stat-toggle="pitch" checked><span class="stl-tog-sl"></span></span></label>
+            <label class="stl-tog-row"><span>VMG</span><span class="stl-tog"><input type="checkbox" data-timeline-stat-toggle="vmg" checked><span class="stl-tog-sl"></span></span></label>
+            <label class="stl-tog-row"><span>TWA</span><span class="stl-tog"><input type="checkbox" data-timeline-stat-toggle="twa" checked><span class="stl-tog-sl"></span></span></label>
+            <label class="stl-tog-row"><span>Roll M</span><span class="stl-tog"><input type="checkbox" data-timeline-stat-toggle="roll" checked><span class="stl-tog-sl"></span></span></label>
+            <label class="stl-tog-row"><span>Trunk</span><span class="stl-tog"><input type="checkbox" data-timeline-stat-toggle="trunk" checked><span class="stl-tog-sl"></span></span></label>
+            <label class="stl-tog-row"><span>Rudder</span><span class="stl-tog"><input type="checkbox" data-timeline-stat-toggle="rudder" checked><span class="stl-tog-sl"></span></span></label>
+            <label class="stl-tog-row"><span>Boom</span><span class="stl-tog"><input type="checkbox" data-timeline-stat-toggle="boom" checked><span class="stl-tog-sl"></span></span></label>
+          </div>
         </div>
         <div class="advanced-settings-group" id="ath-settings-wrap">
           <div class="advanced-settings-title">Processing And Timeline</div>
@@ -1726,7 +1758,7 @@
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
 <script type="module">
-  const appVersion = '20260615extsync1';
+  const appVersion = '20260615layoutstats1';
   const sameFolderApp = `./app.js?v=${appVersion}`;
   const fastApiApp = `/static/app.js?v=${appVersion}`;
   const isLocalDev = ['localhost', '127.0.0.1'].includes(window.location.hostname);

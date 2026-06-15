@@ -1,8 +1,8 @@
-const CACHE_NAME = 'trollfish-static-v20260615-extsync1';
+const CACHE_NAME = 'trollfish-static-v20260615-layoutstats1';
 const PRECACHE_URLS = [
   './index.html',
   './manifest.webmanifest',
-  './app.js?v=20260615extsync1',
+  './app.js?v=20260615layoutstats1',
   './icons/icon-192.svg',
   './icons/icon-512.svg',
 ];
