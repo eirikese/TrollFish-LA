@@ -127,6 +127,7 @@ const state = {
   timelineStatsWindowSec: 1,
   timelineStatOverlayGraph: false,
   timelineSogGapStitching: false,
+  externalVideoContinuousTimeSync: false,
   poseMode: '3d',
   poseMinConfidence: 0.8,
   poseInputMaxDim: 480,
@@ -199,6 +200,7 @@ const HIDDEN_VIDEO_SLOTS_KEY_PREFIX = 'trollfish_hiddenVideoSlots_';
 const TL_STATS_WINDOW_KEY = 'trollfish_tlStatsWindowSec_v1';
 const TL_STATS_OVERLAY_GRAPH_KEY = 'trollfish_tlStatsOverlayGraph_v1';
 const TL_SOG_GAP_STITCHING_KEY = 'trollfish_tlSogGapStitching_v1';
+const EXTERNAL_VIDEO_CONTINUOUS_TIME_SYNC_KEY = 'trollfish_externalVideoContinuousTimeSync_v1';
 const POSE_MODE_KEY = 'trollfish_poseMode_v1';
 const POSE_MIN_CONFIDENCE_KEY = 'trollfish_poseMinConfidence_v1';
 const POSE_INPUT_MAX_DIM_KEY = 'trollfish_poseInputMaxDim_v1';
@@ -398,6 +400,27 @@ function setTimelineSogGapStitching(enabled) {
   if (toggle) toggle.checked = !!state.timelineSogGapStitching;
   buildTimeline();
   updateTimelineStats();
+}
+
+function loadExternalVideoContinuousTimeSyncSetting() {
+  state.externalVideoContinuousTimeSync = !!loadJsonLocal(EXTERNAL_VIDEO_CONTINUOUS_TIME_SYNC_KEY, false);
+  const toggle = el('external-video-continuous-sync-toggle');
+  if (toggle) toggle.checked = !!state.externalVideoContinuousTimeSync;
+}
+
+function setExternalVideoContinuousTimeSync(enabled) {
+  state.externalVideoContinuousTimeSync = !!enabled;
+  saveJsonLocal(EXTERNAL_VIDEO_CONTINUOUS_TIME_SYNC_KEY, state.externalVideoContinuousTimeSync);
+  const toggle = el('external-video-continuous-sync-toggle');
+  if (toggle) toggle.checked = !!state.externalVideoContinuousTimeSync;
+  state.phonePlayback.lastDriftCorrectAt = 0;
+  if (state.phonePlayback.enabled) {
+    syncPhonePlaybackToTimeline({ forceSeek: true, forceReload: false });
+  }
+}
+
+function isExternalVideoContinuousTimeSyncEnabled() {
+  return !!state.externalVideoContinuousTimeSync;
 }
 
 function normalizePoseInputMaxDim(value) {
@@ -2200,7 +2223,8 @@ function syncPhonePlaybackToTimeline({ forceSeek = false, forceReload = false } 
     const currentTime = Number.isFinite(phone.videoEl.currentTime) ? phone.videoEl.currentTime : null;
     const driftSec = currentTime == null ? Number.POSITIVE_INFINITY : Math.abs(currentTime - videoSec);
     const nowMs = performance.now();
-    const shouldCorrectDrift = state.tl.playing
+    const shouldCorrectDrift = isExternalVideoContinuousTimeSyncEnabled()
+      && state.tl.playing
       && driftSec > 0.18
       && nowMs - (phone.lastDriftCorrectAt || 0) > 180;
     if (forceSeek || !state.tl.playing || shouldCorrectDrift) {
@@ -14570,6 +14594,8 @@ function applyAdvancedModeVisibility() {
   if (poseInputSizeSelect) poseInputSizeSelect.value = String(getPoseInputMaxDim());
   const poseExactSegmentSeekToggle = el('pose-exact-segment-seek-toggle');
   if (poseExactSegmentSeekToggle) poseExactSegmentSeekToggle.checked = isPoseExactSegmentSeekEnabled();
+  const externalVideoContinuousSyncToggle = el('external-video-continuous-sync-toggle');
+  if (externalVideoContinuousSyncToggle) externalVideoContinuousSyncToggle.checked = isExternalVideoContinuousTimeSyncEnabled();
   syncInlineHeatmapMenuVisibilityInputs();
   const settingsWrap = el('ath-settings-wrap');
   if (settingsWrap) settingsWrap.classList.toggle('open', advanced);
@@ -15088,6 +15114,7 @@ async function init() {
   loadTimelineStatsWindowSetting();
   loadTimelineStatOverlayGraphSetting();
   loadTimelineSogGapStitchingSetting();
+  loadExternalVideoContinuousTimeSyncSetting();
   loadPoseProcessingSettings();
   loadInlineHeatmapMenuVisibilitySetting();
   loadInlineHeatmapPanelWidthSetting();
@@ -15180,6 +15207,8 @@ async function init() {
   if (tlStatOverlayToggle) tlStatOverlayToggle.addEventListener('change', e => setTimelineStatOverlayGraph(e.target.checked));
   const tlSogGapStitchingToggle = el('tl-sog-gap-stitching-toggle');
   if (tlSogGapStitchingToggle) tlSogGapStitchingToggle.addEventListener('change', e => setTimelineSogGapStitching(e.target.checked));
+  const externalVideoContinuousSyncToggle = el('external-video-continuous-sync-toggle');
+  if (externalVideoContinuousSyncToggle) externalVideoContinuousSyncToggle.addEventListener('change', e => setExternalVideoContinuousTimeSync(e.target.checked));
   const advTowToggle = el('advanced-tow-filter-toggle');
   if (advTowToggle) advTowToggle.addEventListener('change', e => setTowFilteringDisabledForTrustedSession(!e.target.checked));
   const advToggle = el('advanced-mode-toggle');

@@ -18,13 +18,15 @@ export const MAX_PLAUSIBLE_SPEED_MS = 25.0;
 /** Default camera parameters from ProjectCvConfig */
 export const DEFAULT_CV_CONFIG = Object.freeze({
   pose_model: 'full',
+  pose_mode: '3d',
+  pose_min_confidence: 0.8,
   camera_position: [-3.194, 0.02, 0.585],
   camera_pitch_deg: 14.7,
   camera_yaw_deg: 0.0,
   camera_roll_deg: 0.0,
   camera_R_wc: null,
-  lower_plane_z: -0.03,
-  hip_plane_z: 0.02,
+  lower_plane_z: 0.0,
+  hip_plane_z: 0.07,
   lower_landmark: 'ankle',
   athlete_weight: 75.0,
   athlete_height: null,
@@ -40,19 +42,11 @@ export const DEFAULT_CV_CONFIG = Object.freeze({
     avg_frames: 5,
     min_valid_frames: 5,
   },
-  // Manual tuning offset applied ON TOP of the (possibly Auto-PnP) camera pose,
-  // set from the Hull 3D tuning panel. Angles in degrees (camera-relative),
-  // positions/plane heights in metres. All zero = no override.
-  camera_pose_offset: {
-    pitch_deg: 0.0,
-    yaw_deg: 0.0,
-    roll_deg: 0.0,
-    x_m: 0.0,
-    y_m: 0.0,
-    z_m: 0.0,
-    hip_z_m: 0.0,
-    ankle_z_m: 0.0,
-  },
+  // Fixed camera pose solved from the user's hand-corrected boat keypoints
+  // (Hull 3D → Calibrate keypoints). When set, the pose engine uses it for the
+  // whole clip and disables Auto-PnP. null = use Auto-PnP / defaults.
+  //   { camPos:[x,y,z], R_wc:[9 or 3×3], keypoints:[{x,y,label}], frameTs, meanErrorPx }
+  manual_camera_pose: null,
 });
 
 /** Calibration files will be loaded lazily and cached here */
